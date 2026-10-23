@@ -11,18 +11,19 @@ jobs:
   discover:
     runs-on: ubuntu-latest
     steps:
-      - name: llama.cpp latest release assets (name, size, sha256)
+      - name: llama.cpp release assets (name, size, sha256)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          for tag in $(gh api repos/ggml-org/llama.cpp/releases?per_page=3 -q '.[].tag_name'); do echo "TAG $tag"; done
-          gh api repos/ggml-org/llama.cpp/releases/latest > rel.json
-          jq -r '.tag_name as $t | .assets[] | select(.name | test("win-(cpu|vulkan)-x64|ubuntu-x64|ubuntu-vulkan")) | "\($t) \(.name) \(.size) \(.digest)"' rel.json | tee assets.txt
-          echo "ALL ASSET NAMES:" >> assets.txt
-          jq -r '.assets[].name' rel.json | tr '\n' ' ' >> assets.txt
-          lines=$(awk 'BEGIN{ORS="%0A"}{print}' assets.txt)
-          echo "::warning title=llama.cpp assets::${lines}"
+          gh api "repos/ggml-org/llama.cpp/releases?per_page=8" > rels.json
+          jq -r '.[] | "\(.tag_name) prerelease=\(.prerelease) draft=\(.draft) assets=\(.assets|length) \(.published_at)"' rels.json | tee summary.txt
+          # first release that actually ships Windows CPU binaries
+          tag=$(jq -r '[.[] | select(any(.assets[]; .name | test("win-cpu-x64")))][0].tag_name' rels.json)
+          echo "PICK $tag" >> summary.txt
+          jq -r --arg t "$tag" '.[] | select(.tag_name==$t) | .assets[] | select(.name | test("win-(cpu|vulkan)-x64|ubuntu-x64|ubuntu-vulkan")) | "\(.name) \(.size) \(.digest) \(.browser_download_url)"' rels.json >> summary.txt
+          echo "::warning title=llama.cpp assets::$(awk 'BEGIN{ORS="%0A"}{print}' summary.txt)"
+
       - name: Hugging Face GGUF files (path, size, sha256)
         run: |
           set -e
