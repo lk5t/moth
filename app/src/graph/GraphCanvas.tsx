@@ -44,7 +44,7 @@ export interface GraphSettings {
   showArrows: boolean;
 }
 
-interface SimNode extends SimulationNodeDatum, GraphNodeData {
+interface SimNode extends SimulationNodeDatum, Omit<GraphNodeData, "x" | "y"> {
   r: number;
   color: string;
 }
