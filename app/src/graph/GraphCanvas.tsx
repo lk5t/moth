@@ -7,18 +7,29 @@
 //  - Every visual state (hover, selection, neighbours, dimming, label fade) is an eased value per node/edge,
 //    so changes fade in and out instead of switching.
 //  - The animation loop runs only while something is moving (simulation, easing, real events) and stops when
-//    the page is hidden; an optional low-rate ambient shimmer exists only in the "full" motion level.
+//    the page is hidden.
 //  - Layout: link + many-body + collision forces, plus a gentle pull toward a per-project anchor computed from
 //    real project membership, so projects form readable clusters instead of one central blob.
 //  - Living graph: real "memory created / updated / linked" events fade nodes in, reveal edges and send a
 //    restrained pulse along new connections. Nothing is simulated.
+//
+// v0.3.0 "Living Atmosphere":
+//  - The graph canvas is transparent and sits on the atmosphere layer (atmosphere.ts): deep charcoal, faint
+//    lavender light, vignette, grain and an optional slow particle field with camera parallax.
+//  - Node cores are luminous white / grey / muted lavender by importance; pinned (starred), project hub and very
+//    important memories "breathe" gently, as does the selected memory, and light flows slowly along its connections.
+//  - Projects read as areas of thought: a soft glow region and a name per cluster, computed from real positions
+//    and eased, so a cluster that grows or moves transitions smoothly. Clicking a name focuses the cluster.
+//  - Camera: eased wheel zoom anchored at the pointer, eased focus/fit, and any user gesture cancels an animation
+//    in progress so the view never fights the user.
 import { drag as d3drag } from "d3-drag";
 import { forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY, type Simulation, type SimulationLinkDatum, type SimulationNodeDatum } from "d3-force";
 import { quadtree, type Quadtree } from "d3-quadtree";
 import { select } from "d3-selection";
 import { zoom as d3zoom, zoomIdentity, type ZoomBehavior, type ZoomTransform } from "d3-zoom";
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
-import { motionLevel } from "../lib/motion";
+import { ambientEnabled, motionLevel } from "../lib/motion";
+import { ATMOSPHERE_BASE, Atmosphere } from "./atmosphere";
 import { CATEGORY_COLOR } from "../lib/utils";
 
 export interface GraphNodeData {
@@ -34,6 +45,9 @@ export interface GraphNodeData {
   flags?: string[];
   status?: string;
   updated_at?: string;
+  /** User-pinned ("starred") memory: a core memory that breathes softly. */
+  starred?: boolean;
+  memory_type?: string;
 }
 
 export interface GraphLinkData {
@@ -71,6 +85,20 @@ interface SimNode extends SimulationNodeDatum, Omit<GraphNodeData, "x" | "y"> {
   appearAt: number; // performance.now() when it entered (fade/scale in), 0 = no entrance
   pulseAt: number; // last real update pulse
   phase: number; // ambient shimmer phase
+  core: boolean; // breathes (starred, project hub or very important)
+}
+
+interface ClusterState {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  r: number;
+  a: number; // eased visibility
+  hot: number; // eased hover/focus emphasis
+  color: string;
+  members: SimNode[];
+  seen: boolean;
 }
 interface SimLink extends SimulationLinkDatum<SimNode> {
   id: string;
@@ -78,6 +106,19 @@ interface SimLink extends SimulationLinkDatum<SimNode> {
   strength: number;
   hi: number;
   bornAt: number; // reveal + pulse for new relationships
+}
+
+export interface PhaseResult {
+  fps: number;
+  p95FrameMs: number;
+  avgDrawMs: number;
+}
+export interface SmoothnessResult {
+  nodes: number;
+  links: number;
+  pan: PhaseResult;
+  zoom: PhaseResult;
+  hover: PhaseResult;
 }
 
 export interface GraphHandle {
@@ -92,6 +133,10 @@ export interface GraphHandle {
   markNew: (ids: string[]) => void;
   markNewLinks: (ids: string[]) => void;
   pulse: (ids: string[]) => void;
+  /** Glide to a project's cluster and emphasise it. */
+  focusCluster: (projectId: string) => void;
+  /** Real smoothness measurement on this machine: moves the camera and hover itself and counts frames. */
+  measure: () => Promise<SmoothnessResult>;
   stats: () => { nodes: number; links: number; frames: number; lastFrameMs: number; running: boolean };
 }
 
@@ -106,6 +151,10 @@ interface Props {
   compact?: boolean;
   motion?: MotionLevel;
   clusterByProject?: boolean;
+  /** Living atmosphere (particles, breathing, flowing selection light). Defaults to the app setting. */
+  ambient?: boolean;
+  /** Project names for cluster labels (real projects only). */
+  clusters?: { id: string; name: string }[];
   onSelect?: (id: string | null) => void;
   onFocus?: (id: string) => void;
   onContext?: (id: string, x: number, y: number) => void;
@@ -113,9 +162,51 @@ interface Props {
   onPositions?: (items: { id: string; x: number; y: number; pinned?: boolean }[]) => void;
 }
 
-const BG = "#1C1C1C";
-const NODE = "#C9C9D0";
+const BG = ATMOSPHERE_BASE;
+const NODE = "#BDBDC8";
+const NODE_BRIGHT = "#EEEDF4";
+const NODE_FAINT = "#8F8F9E";
 const NODE_HUB = "#D9D3F5";
+
+/** Luminous white / grey / muted lavender cores, by what the memory is. */
+function coreColor(n: { category: string; importance: number; starred?: boolean }): string {
+  if (n.category === "project" || n.starred) return NODE_HUB;
+  if (n.importance >= 0.7) return NODE_BRIGHT;
+  if (n.importance < 0.35) return NODE_FAINT;
+  return NODE;
+}
+const isCore = (n: { category: string; importance: number; starred?: boolean }) => n.category === "project" || !!n.starred || n.importance >= 0.85;
+
+/** Soft region sprite for clusters (very low alpha, long falloff). Cached per colour. */
+const regionSprites = new Map<string, HTMLCanvasElement>();
+function regionSprite(hex: string): HTMLCanvasElement {
+  const hit = regionSprites.get(hex);
+  if (hit) return hit;
+  const S = 256;
+  const c = document.createElement("canvas");
+  c.width = c.height = S;
+  const g = c.getContext("2d")!;
+  const v = parseInt(hex.replace("#", ""), 16);
+  // Blend the project colour toward lavender so regions stay in one family.
+  const mix = (a: number, b: number) => Math.round(a * 0.45 + b * 0.55);
+  const rgb = `${mix((v >> 16) & 255, 167)},${mix((v >> 8) & 255, 139)},${mix(v & 255, 250)}`;
+  const grad = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+  grad.addColorStop(0, `rgba(${rgb},0.15)`);
+  grad.addColorStop(0.45, `rgba(${rgb},0.085)`);
+  grad.addColorStop(0.8, `rgba(${rgb},0.025)`);
+  grad.addColorStop(1, `rgba(${rgb},0)`);
+  g.fillStyle = grad;
+  g.fillRect(0, 0, S, S);
+  regionSprites.set(hex, c);
+  return c;
+}
+
+/** Stable 0..1 offset per id (so flowing lights don't all move in lockstep). */
+function hash01(id: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 16777619);
+  return ((h >>> 0) % 1000) / 1000;
+}
 const ACCENT = "#A78BFA";
 const ACCENT_SOFT = "#C4B5FD";
 
@@ -167,14 +258,35 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
   const posVersion = useRef(0);
   const pendingNew = useRef(new Map<string, number>());
   const pendingLinks = useRef(new Map<string, number>());
-  const counters = useRef({ frames: 0, lastFrameMs: 0 });
+  const counters = useRef({ frames: 0, lastFrameMs: 0, breathFrames: 0 });
   const ambientTimer = useRef<number | null>(null);
+  const moteCanvas = useRef<HTMLCanvasElement>(null);
+  const regionCanvas = useRef<HTMLCanvasElement>(null);
+  const breathCanvas = useRef<HTMLCanvasElement>(null);
+  const regionSig = useRef("");
+  const regionAt = useRef({ x: 0, y: 0, k: 1 });
+  const regionSettle = useRef<number | null>(null);
+  const regionCss = useRef("");
+  const atmos = useRef<Atmosphere | null>(null);
+  const clusters = useRef(new Map<string, ClusterState>());
+  const clusterLabels = useRef<{ id: string; x0: number; y0: number; x1: number; y1: number }[]>([]);
+  const hoverCluster = useRef<string | null>(null);
+  const focusedCluster = useRef<string | null>(null);
+  const cameraToken = useRef(0);
+  const wheelAnim = useRef<{ k: number; px: number; py: number; raf: number | null; last: number } | null>(null);
+  const breathing = useRef(false);
+  /** Cluster targets (centre/radius) are recomputed only when node positions change, not on hover frames. */
+  const clusterTargets = useRef<{ version: number; key: string; items: Map<string, { cx: number; cy: number; r: number; members: SimNode[] }> } | null>(null);
+  /** Smooth zoom falls back to direct steps if this machine can't redraw fast enough (keeps it responsive). */
+  const zoomPerf = useRef({ slow: false, dts: [] as number[] });
   live.current = props;
 
   const motion = (): MotionLevel => {
     const m = live.current.motion ?? motionLevel();
     return live.current.settings.animate === false ? "minimal" : m;
   };
+  /** Ambient motion (breathing, flowing light) is on only if enabled, not compact and motion isn't Minimal. */
+  const ambientOn = () => (live.current.ambient ?? ambientEnabled()) && !live.current.compact && motion() !== "minimal";
 
   // ------------------------------------------------------------------ drawing
   const draw = (now: number) => {
@@ -225,14 +337,72 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     }
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = BG;
-    ctx.fillRect(0, 0, w, h);
+    ctx.clearRect(0, 0, w, h); // transparent: the atmosphere layer shows through
     ctx.save();
     ctx.translate(t.x, t.y);
     ctx.scale(t.k, t.k);
 
-    const anyFocus = !!focusNode || !!hl;
     const zoomedOut = t.k < 0.35;
+    const amb = ambientOn();
+
+    // ---- clusters: soft areas of thought, computed from real positions of each project's memories, eased.
+    const showClusters = !p.compact && !!p.clusters?.length && p.clusterByProject !== false;
+    if (showClusters) {
+      const names = new Map(p.clusters!.map((c) => [c.id, c.name]));
+      const key = p.clusters!.map((c) => c.id).join(",") + "|" + nodesRef.current.length;
+      let targets = clusterTargets.current;
+      if (!targets || targets.version !== posVersion.current || targets.key !== key) {
+        const groups = new Map<string, SimNode[]>();
+        for (const n of nodesRef.current) {
+          if (!n.project_id || !names.has(n.project_id)) continue;
+          let g = groups.get(n.project_id);
+          if (!g) groups.set(n.project_id, (g = []));
+          g.push(n);
+        }
+        const items = new Map<string, { cx: number; cy: number; r: number; members: SimNode[] }>();
+        for (const [id, members] of groups) {
+          if (members.length < 3) continue;
+          let sx = 0, sy = 0;
+          for (const n of members) (sx += n.x!), (sy += n.y!);
+          const cx = sx / members.length, cy = sy / members.length;
+          // Radius from the 85th-percentile distance, so a few outliers (or a hub pulled away) don't inflate it.
+          const ds = members.map((n) => Math.hypot(n.x! - cx, n.y! - cy)).sort((a, b) => a - b);
+          items.set(id, { cx, cy, r: Math.min(1400, ds[Math.floor(ds.length * 0.85)] * 1.12 + 26), members });
+        }
+        targets = clusterTargets.current = { version: posVersion.current, key, items };
+      }
+      for (const c of clusters.current.values()) c.seen = false;
+      for (const [id, { cx, cy, r: tr, members }] of targets.items) {
+        let c = clusters.current.get(id);
+        if (!c) {
+          c = { id, name: names.get(id)!, x: cx, y: cy, r: tr, a: 0, hot: 0, color: p.projectColors?.get(id) ?? ACCENT, members, seen: true };
+          clusters.current.set(id, c);
+        }
+        c.seen = true;
+        c.members = members;
+        c.name = names.get(id)!;
+        c.color = p.projectColors?.get(id) ?? ACCENT;
+        const kk = m === "minimal" ? 1 : 1 - Math.exp(-dt / 240); // slow, calm transitions
+        const bx = c.x, by = c.y, br = c.r;
+        c.x = approach(c.x, cx, kk);
+        c.y = approach(c.y, cy, kk);
+        c.r = approach(c.r, tr, kk);
+        if (Math.abs(c.x - bx) + Math.abs(c.y - by) + Math.abs(c.r - br) > 0.05) moving = true;
+      }
+      for (const c of clusters.current.values()) {
+        const ta = c.seen ? 1 : 0;
+        const th = hoverCluster.current === c.id || focusedCluster.current === c.id ? 1 : 0;
+        const ba = c.a, bh = c.hot;
+        c.a = approach(c.a, ta, m === "minimal" ? 1 : 1 - Math.exp(-dt / 300));
+        c.hot = approach(c.hot, th, k);
+        if (c.a !== ba || c.hot !== bh) moving = true;
+        if (!c.seen && c.a === 0) clusters.current.delete(c.id);
+      }
+      paintRegions(focusNode || hl ? 1 : 0);
+    } else if (clusters.current.size) {
+      clusters.current.clear();
+      paintRegions(0);
+    }
 
     // ---- edges: one batched pass for ordinary edges, individual passes only for highlighted/new ones
     const lw = (0.75 * s.linkThickness) / Math.max(0.55, Math.sqrt(t.k));
@@ -298,10 +468,16 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     // ---- glow (additive), behind the node cores
     const sp = sprites.current;
     ctx.globalCompositeOperation = "lighter";
-    const idleGlow = m === "full" ? 0.16 : m === "balanced" ? 0.1 : 0;
-    const shimmer = m === "full";
+    const idleGlow = m === "full" ? 0.16 : m === "balanced" ? 0.12 : 0.06;
+    let anyBreath = false;
     for (const n of nodesRef.current) {
       let g = n.glow;
+      // The selected memory breathes gently (ambient only): its steady part is drawn here,
+      // the slowly varying part on the breathing layer (drawBreath), so idle frames stay cheap.
+      if (amb && n.id === p.selectedId && g > 0.3) {
+        g *= 0.84;
+        anyBreath = true;
+      }
       // Real-event light: new memories and updates.
       if (n.appearAt) {
         const age = now - n.appearAt;
@@ -318,20 +494,29 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
         } else n.pulseAt = 0;
       }
       let idle = 0;
-      if (idleGlow && !zoomedOut && n.dim < 0.5) {
+      if (idleGlow && n.dim < 0.5 && (!zoomedOut || n.core)) {
         idle = idleGlow * (0.5 + n.importance * 0.7) * (n.category === "project" ? 1.4 : 1);
-        if (shimmer) idle *= 0.85 + 0.15 * Math.sin(now / 2400 + n.phase);
+        if (n.core) {
+          // Core memories (starred, project hubs, very important) carry a little more light and breathe
+          // (steady part here, breathing part on the breathing layer).
+          idle = Math.max(idle, 0.2);
+          if (amb) {
+            idle *= 0.78;
+            anyBreath = true;
+          }
+        }
       }
       const intensity = Math.max(g, idle) * (1 - 0.85 * n.dim);
       if (intensity < 0.01) continue;
       let R = Math.max(n.r * (3.4 + 2.6 * n.glow + n.grow * 0.6), (6 + 14 * Math.max(n.glow, g * 0.8)) / Math.max(0.5, t.k));
       // A real new memory or update briefly lights up its surroundings.
       if ((n.appearAt || n.pulseAt) && m !== "minimal") R = Math.max(R, (22 + 26 * g) / Math.max(0.5, t.k));
-      const sprite = n.glow > 0.5 || n.id === p.selectedId || (n.appearAt && m !== "minimal") ? sp.lavender : sp.white;
+      const sprite = n.glow > 0.5 || n.id === p.selectedId || (n.appearAt && m !== "minimal") || (n.core && n.starred) ? sp.lavender : sp.white;
       ctx.globalAlpha = Math.min(1, intensity);
       ctx.drawImage(sprite, n.x! - R, n.y! - R, R * 2, R * 2);
     }
     ctx.globalCompositeOperation = "source-over";
+    breathing.current = anyBreath || (amb && !!p.selectedId);
 
     // ---- pulses travelling along new relationships (real events only)
     if (m !== "minimal") {
@@ -365,7 +550,7 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
         alpha *= e;
       }
       if (n.status && n.status !== "active") alpha *= 0.45;
-      let fill = s.colorBy === "none" ? (n.category === "project" ? NODE_HUB : NODE) : n.color;
+      let fill = s.colorBy === "none" ? coreColor(n) : n.color;
       if (n.id === p.selectedId) fill = ACCENT_SOFT;
       else if (focusNode && n.id === focusNode.id) fill = "#FFFFFF";
       else if (hl?.has(n.id) && !focusNode) fill = ACCENT_SOFT;
@@ -421,6 +606,37 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     }
     ctx.restore();
 
+    // ---- cluster names (screen space): readable when zoomed out, fading as memory labels take over
+    clusterLabels.current = [];
+    if (showClusters && clusters.current.size) {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.font = `600 10.5px "Geist Variable", "Segoe UI", system-ui, sans-serif`;
+      (ctx as any).letterSpacing = "0.14em";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const zoomFade = Math.max(0, Math.min(1, (2.3 - t.k) / 0.9));
+      const focusIn = focusNode?.project_id ?? null;
+      for (const c of clusters.current.values()) {
+        const sr = c.r * t.k;
+        if (sr < 26 || c.a < 0.05) continue;
+        const sx = c.x * t.k + t.x;
+        const sy = (c.y - c.r * 0.98) * t.k + t.y - 4;
+        if (sx < -150 || sx > w + 150 || sy < -20 || sy > h + 20) continue;
+        const dimC = focusNode ? (c.id === focusIn ? 0 : 0.7) : hl ? 0.5 : 0;
+        const a = c.a * Math.max(zoomFade, c.hot) * (0.5 + 0.45 * c.hot) * (1 - dimC);
+        if (a < 0.03) continue;
+        const label = (c.name.length > 32 ? c.name.slice(0, 30) + "…" : c.name).toUpperCase();
+        const tw = ctx.measureText(label).width;
+        const ly = Math.max(74, Math.min(h - 40, sy)); // stay clear of the toolbar and the status line
+        ctx.globalAlpha = a;
+        ctx.fillStyle = c.hot > 0.5 ? "#E9E5FF" : "#C9C3E8";
+        ctx.fillText(label, sx, ly);
+        clusterLabels.current.push({ id: c.id, x0: sx - tw / 2 - 8, y0: ly - 11, x1: sx + tw / 2 + 8, y1: ly + 11 });
+      }
+      (ctx as any).letterSpacing = "0px";
+      ctx.globalAlpha = 1;
+    }
+
     // ---- tooltip (screen space) for the hovered node
     const hv = hover.current;
     if (hv && !p.compact && hv.grow > 0.05) {
@@ -450,7 +666,145 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
 
     counters.current.frames++;
     counters.current.lastFrameMs = performance.now() - t0;
+    drawBreath(now);
     if (moving && !document.hidden) requestDraw();
+  };
+
+  /** The breathing layer: only the slowly varying light (core memories, the selected memory and the light
+   *  flowing along its connections). Redrawing it touches a handful of sprites, never the whole graph. */
+  const drawBreath = (now: number) => {
+    const bc = breathCanvas.current;
+    const g = bc?.getContext("2d");
+    if (!bc || !g || !sprites.current) return;
+    const amb = ambientOn();
+    const disp = amb ? "block" : "none";
+    if (bc.style.display !== disp) bc.style.display = disp;
+    if (!amb) return;
+    const { w, h, dpr } = size.current;
+    if (bc.width !== Math.round(w * dpr) || bc.height !== Math.round(h * dpr)) {
+      bc.width = Math.round(w * dpr);
+      bc.height = Math.round(h * dpr);
+      bc.style.width = `${w}px`;
+      bc.style.height = `${h}px`;
+    }
+    const t = transform.current;
+    const p = live.current;
+    const m = motion();
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    g.translate(t.x, t.y);
+    g.scale(t.k, t.k);
+    g.globalCompositeOperation = "lighter";
+    const sp = sprites.current;
+    const idleGlow = m === "full" ? 0.16 : 0.12;
+    const breath = 0.5 + 0.5 * Math.sin(now / 680); // ~4.3 s cycle
+    const x0 = -t.x / t.k - 60, y0 = -t.y / t.k - 60, x1 = (w - t.x) / t.k + 60, y1 = (h - t.y) / t.k + 60;
+    for (const n of nodesRef.current) {
+      if (n.x! < x0 || n.x! > x1 || n.y! < y0 || n.y! > y1) continue;
+      let a = 0;
+      if (n.core && n.dim < 0.5) {
+        const idle = Math.max(idleGlow * (0.5 + n.importance * 0.7) * (n.category === "project" ? 1.4 : 1), 0.2);
+        a = idle * 0.32 * (0.5 + 0.5 * Math.sin(now / 680 + n.phase));
+      }
+      if (n.id === p.selectedId && n.glow > 0.3) a = Math.max(a, n.glow * 0.16 * breath + 0.0);
+      a *= 1 - 0.85 * n.dim;
+      if (a < 0.005) continue;
+      const R = Math.max(n.r * (3.4 + 2.6 * n.glow + n.grow * 0.6), (6 + 14 * n.glow) / Math.max(0.5, t.k));
+      g.globalAlpha = Math.min(1, a);
+      g.drawImage(n.glow > 0.5 || n.id === p.selectedId || n.starred ? sp.lavender : sp.white, n.x! - R, n.y! - R, R * 2, R * 2);
+    }
+    // Light flows slowly outward along the selected memory's real connections.
+    const sel = p.selectedId ? byId.current.get(p.selectedId) : undefined;
+    if (sel && !p.compact) {
+      const R = 4.2 / Math.max(0.6, Math.sqrt(t.k));
+      for (const l of linksRef.current) {
+        if (l.hi < 0.05) continue;
+        const a = l.source as SimNode;
+        const b = l.target as SimNode;
+        if (a !== sel && b !== sel) continue;
+        const to = a === sel ? b : a;
+        const u = (now / 2800 + hash01(l.id)) % 1;
+        g.globalAlpha = Math.sin(Math.PI * u) * 0.5 * l.hi * (1 - 0.6 * to.dim);
+        g.drawImage(sp.lavender, sel.x! + (to.x! - sel.x!) * u - R, sel.y! + (to.y! - sel.y!) * u - R, R * 2, R * 2);
+      }
+    }
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = "source-over";
+    counters.current.breathFrames++;
+  };
+  const breathFrame = useRef<number | null>(null);
+  const requestBreath = () => {
+    if (breathFrame.current !== null || document.hidden) return;
+    breathFrame.current = requestAnimationFrame((ts) => {
+      breathFrame.current = null;
+      drawBreath(ts);
+    });
+  };
+
+  /** Cluster glow regions live on their own layer and are repainted only when they (or the camera) change,
+   *  not on every breathing frame: large soft gradients are the most expensive thing to redraw. */
+  const paintRegions = (dimmed: number) => {
+    const rc = regionCanvas.current;
+    const g = rc?.getContext("2d");
+    if (!rc || !g) return;
+    // Dimming while a memory is focused: one cheap opacity change on the whole layer, eased by CSS.
+    const op = dimmed ? "0.45" : "1";
+    if (rc.style.opacity !== op) rc.style.opacity = op;
+    const disp = clusters.current.size ? "block" : "none";
+    if (rc.style.display !== disp) rc.style.display = disp;
+    const { w, h, dpr } = size.current;
+    const t = transform.current;
+    const list = [...clusters.current.values()].filter((c) => c.a >= 0.01);
+    const shape = `${w}x${h}@${dpr}|` + list.map((c) => `${c.id}:${c.x.toFixed(1)},${c.y.toFixed(1)},${c.r.toFixed(1)},${c.a.toFixed(2)},${c.hot.toFixed(2)}`).join(";");
+    const at = regionAt.current;
+    if (shape === regionSig.current) {
+      // Only the camera moved: slide/scale the already-painted layer (compositor work only)
+      // and repaint it crisply once the camera has been still for a moment.
+      if (at.x === t.x && at.y === t.y && at.k === t.k) return;
+      const sc = t.k / at.k;
+      const css = `translate(${t.x - at.x * sc}px, ${t.y - at.y * sc}px) scale(${sc})`;
+      // Unchanged camera (e.g. a breathing frame): keep the pending repaint timer running.
+      if (regionCss.current === css && regionSettle.current) return;
+      regionCss.current = css;
+      rc.style.transformOrigin = "0 0";
+      rc.style.transform = css;
+      if (regionSettle.current) clearTimeout(regionSettle.current);
+      regionSettle.current = window.setTimeout(() => {
+        regionSettle.current = null;
+        regionSig.current = "";
+        requestDraw();
+      }, 140);
+      return;
+    }
+    regionSig.current = shape;
+    regionAt.current = { x: t.x, y: t.y, k: t.k };
+    regionCss.current = "";
+    rc.style.transform = "";
+    if (rc.width !== Math.round(w * dpr) || rc.height !== Math.round(h * dpr)) {
+      rc.width = Math.round(w * dpr);
+      rc.height = Math.round(h * dpr);
+      rc.style.width = `${w}px`;
+      rc.style.height = `${h}px`;
+    }
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    g.translate(t.x, t.y);
+    g.scale(t.k, t.k);
+    for (const c of list) {
+      const R = c.r * 1.35;
+      g.globalAlpha = Math.min(1, c.a * (0.9 + 0.9 * c.hot));
+      g.drawImage(regionSprite(c.color), c.x - R, c.y - R, R * 2, R * 2);
+      if (c.hot > 0.02) {
+        // Soft boundary only while the cluster is hovered or focused.
+        g.globalAlpha = 0.14 * c.hot * c.a;
+        g.strokeStyle = ACCENT_SOFT;
+        g.lineWidth = 1 / t.k;
+        g.beginPath();
+        g.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+        g.stroke();
+      }
+    }
+    g.globalAlpha = 1;
   };
 
   const requestDraw = () => {
@@ -526,6 +880,8 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     const c = canvas.current;
     if (!z || !c) return;
     const sel = select(c);
+    const token = ++cameraToken.current; // a newer camera move or any user gesture cancels this one
+    stopWheel();
     if (ms <= 0 || motion() === "minimal") {
       z.transform(sel, target);
       return;
@@ -533,6 +889,7 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     const from = transform.current;
     const start = performance.now();
     const step = () => {
+      if (token !== cameraToken.current) return;
       const u = Math.min(1, (performance.now() - start) / ms);
       const e = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2; // ease-in-out cubic
       // Interpolate zoom geometrically so zoom changes feel even.
@@ -547,6 +904,88 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
       if (u < 1) requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
+  };
+
+  const stopWheel = () => {
+    if (wheelAnim.current?.raf) cancelAnimationFrame(wheelAnim.current.raf);
+    wheelAnim.current = null;
+  };
+  const cancelCamera = () => {
+    cameraToken.current++;
+    stopWheel();
+  };
+
+  /** Eased wheel zoom, anchored at the pointer: the point under the cursor stays put. */
+  const onWheelZoom = (e: WheelEvent) => {
+    const z = zoomRef.current;
+    const c = canvas.current;
+    if (!z || !c) return;
+    e.preventDefault();
+    cameraToken.current++; // cancel a focus/fit glide
+    const rect = c.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    const delta = -e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.0018);
+    const t = transform.current;
+    const base = wheelAnim.current?.k ?? t.k;
+    const target = Math.max(0.06, Math.min(8, base * Math.pow(2, delta)));
+    const sel = select(c);
+    const apply = (k: number) => {
+      const cur = transform.current;
+      const gx = (px - cur.x) / cur.k;
+      const gy = (py - cur.y) / cur.k;
+      z.transform(sel, zoomIdentity.translate(px - gx * k, py - gy * k).scale(k));
+    };
+    if (motion() === "minimal" || zoomPerf.current.slow) {
+      apply(target);
+      return;
+    }
+    if (wheelAnim.current) {
+      wheelAnim.current.k = target;
+      wheelAnim.current.px = px;
+      wheelAnim.current.py = py;
+      return;
+    }
+    const anim = { k: target, px, py, raf: null as number | null, last: performance.now() };
+    wheelAnim.current = anim;
+    const step = (now: number) => {
+      if (wheelAnim.current !== anim) return;
+      const dt = Math.min(64, now - anim.last);
+      anim.last = now;
+      const zp = zoomPerf.current;
+      zp.dts.push(dt);
+      if (zp.dts.length > 12) zp.dts.shift();
+      if (zp.dts.length >= 8 && zp.dts.reduce((a, b) => a + b, 0) / zp.dts.length > 28) zp.slow = true;
+      const cur = transform.current.k;
+      const next = cur + (anim.k - cur) * (1 - Math.exp(-dt / 75));
+      const done = Math.abs(anim.k - next) / anim.k < 0.002;
+      const cx = transform.current;
+      const gx = (anim.px - cx.x) / cx.k;
+      const gy = (anim.py - cx.y) / cx.k;
+      const k2 = done ? anim.k : next;
+      z.transform(sel, zoomIdentity.translate(anim.px - gx * k2, anim.py - gy * k2).scale(k2));
+      if (done) wheelAnim.current = null;
+      else anim.raf = requestAnimationFrame(step);
+    };
+    anim.raf = requestAnimationFrame(step);
+  };
+
+  const clusterAt = (clientX: number, clientY: number): string | null => {
+    const rect = canvas.current?.getBoundingClientRect();
+    if (!rect) return null;
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    const hit = clusterLabels.current.find((l) => x >= l.x0 && x <= l.x1 && y >= l.y0 && y <= l.y1);
+    return hit?.id ?? null;
+  };
+
+  const focusClusterId = (id: string) => {
+    const c = clusters.current.get(id);
+    const members = c?.members ?? nodesRef.current.filter((n) => n.project_id === id);
+    if (!members.length) return;
+    focusedCluster.current = id;
+    fitNodes(members, true, 1.8);
+    requestDraw();
   };
 
   const centerOn = (id: string, scale?: number) => {
@@ -596,6 +1035,60 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
       }
       requestDraw();
     },
+    focusCluster: (id) => focusClusterId(id),
+    measure: async () => {
+      const z = zoomRef.current;
+      const c = canvas.current;
+      if (!z || !c) throw new Error("The graph isn't ready yet");
+      cancelCamera();
+      const sel = select(c);
+      const start = transform.current;
+      const { w, h } = size.current;
+      const visible = nodesRef.current.filter((n) => {
+        const sx = n.x! * start.k + start.x, sy = n.y! * start.k + start.y;
+        return sx > 0 && sx < w && sy > 0 && sy < h;
+      });
+      const phase = (ms: number, step: (u: number) => void) =>
+        new Promise<PhaseResult>((resolve) => {
+          const dts: number[] = [];
+          let draw = 0, n = 0, last = 0;
+          const t0 = performance.now();
+          const tick = (now: number) => {
+            if (last) dts.push(now - last);
+            last = now;
+            const u = (now - t0) / ms;
+            if (u >= 1) {
+              dts.sort((a, b) => a - b);
+              const avg = dts.reduce((a, b) => a + b, 0) / Math.max(1, dts.length);
+              resolve({ fps: Math.round(1000 / Math.max(1, avg)), p95FrameMs: Math.round(dts[Math.floor(dts.length * 0.95)] ?? 0), avgDrawMs: +(draw / Math.max(1, n)).toFixed(1) });
+              return;
+            }
+            step(u);
+            draw += counters.current.lastFrameMs;
+            n++;
+            requestAnimationFrame(tick);
+          };
+          requestAnimationFrame(tick);
+        });
+      const pan = await phase(1600, (u) => {
+        const a = u * Math.PI * 2;
+        z.transform(sel, zoomIdentity.translate(start.x + Math.cos(a) * 120 - 120, start.y + Math.sin(a) * 80).scale(start.k));
+      });
+      const zoom = await phase(1600, (u) => {
+        const k = start.k * Math.pow(2, Math.sin(u * Math.PI * 2) * 0.8);
+        z.transform(sel, zoomIdentity.translate(w / 2 - ((w / 2 - start.x) / start.k) * k, h / 2 - ((h / 2 - start.y) / start.k) * k).scale(k));
+      });
+      z.transform(sel, start);
+      let i = 0;
+      const hoverRes = await phase(1600, () => {
+        if (!visible.length) return requestDraw();
+        if (i++ % 3 === 0) hover.current = visible[Math.floor(Math.random() * visible.length)];
+        requestDraw();
+      });
+      hover.current = null;
+      requestDraw();
+      return { nodes: nodesRef.current.length, links: linksRef.current.length, pan, zoom, hover: hoverRes };
+    },
     pulse: (ids) => {
       const now = performance.now();
       for (const id of ids) {
@@ -611,12 +1104,14 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
   useEffect(() => {
     const c = canvas.current!;
     // Diagnostics hook (used by the performance tests): real counters from this renderer.
-    if (!live.current.compact) (window as any).__mothGraphStats = () => ({ nodes: nodesRef.current.length, links: linksRef.current.length, frames: counters.current.frames, lastFrameMs: counters.current.lastFrameMs, simAlpha: sim.current?.alpha() ?? 0 });
+    if (!live.current.compact) (window as any).__mothGraphStats = () => ({ nodes: nodesRef.current.length, links: linksRef.current.length, frames: counters.current.frames, breathFrames: counters.current.breathFrames, lastFrameMs: counters.current.lastFrameMs, simAlpha: sim.current?.alpha() ?? 0, bgFrames: atmos.current?.frames ?? 0, clusters: [...clusters.current.values()].filter((c) => c.a > 0.5).map((c) => ({ id: c.id, name: c.name })), labels: clusterLabels.current.map((l) => ({ ...l })), transform: { ...transform.current } });
+    if (wrap.current && moteCanvas.current) atmos.current = new Atmosphere(wrap.current, moteCanvas.current);
     const resize = () => {
       if (!wrap.current) return;
       const r = wrap.current.getBoundingClientRect();
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       size.current = { w: r.width, h: r.height, dpr };
+      atmos.current?.resize(r.width, r.height, dpr);
       c.width = Math.round(r.width * dpr);
       c.height = Math.round(r.height * dpr);
       c.style.width = `${r.width}px`;
@@ -650,15 +1145,20 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
 
     const z = d3zoom<HTMLCanvasElement, unknown>()
       .scaleExtent([0.06, 8])
-      .filter((e: any) => (!e.ctrlKey || e.type === "wheel") && !e.button && !(e.type === "mousedown" && findAt(e.clientX, e.clientY)))
-      .wheelDelta((e: any) => -e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.0016))
+      // Wheel zoom is handled by onWheelZoom (eased); d3 handles panning and touch.
+      .filter((e: any) => e.type !== "wheel" && !e.ctrlKey && !e.button && !(e.type === "mousedown" && (findAt(e.clientX, e.clientY) || clusterAt(e.clientX, e.clientY))))
+      .on("start", (e) => {
+        if (e.sourceEvent) cancelCamera(); // the user takes over: stop any glide
+      })
       .on("zoom", (e) => {
         transform.current = e.transform;
+        atmos.current?.setCamera({ x: e.transform.x, y: e.transform.y, k: e.transform.k });
         requestDraw();
       });
     zoomRef.current = z;
     const sel = select(c);
-    sel.call(z).on("dblclick.zoom", null);
+    sel.call(z).on("dblclick.zoom", null).on("wheel.zoom", null);
+    c.addEventListener("wheel", onWheelZoom, { passive: false });
     z.transform(sel, zoomIdentity.translate(size.current.w / 2, size.current.h / 2).scale(live.current.compact ? 0.7 : 1));
 
     if (!live.current.compact) {
@@ -696,16 +1196,22 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
 
     const onMove = (e: MouseEvent) => {
       const n = findAt(e.clientX, e.clientY);
+      const cl = n ? null : clusterAt(e.clientX, e.clientY);
+      if (cl !== hoverCluster.current) {
+        hoverCluster.current = cl;
+        requestDraw();
+      }
       if (n !== hover.current) {
         hover.current = n;
-        c.style.cursor = n ? "pointer" : "default";
         live.current.onHover?.(n);
         requestDraw();
       }
+      c.style.cursor = n || cl ? "pointer" : "default";
     };
     const onLeave = () => {
-      if (hover.current) {
+      if (hover.current || hoverCluster.current) {
         hover.current = null;
+        hoverCluster.current = null;
         live.current.onHover?.(null);
         requestDraw();
       }
@@ -715,6 +1221,17 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     const onClick = (e: MouseEvent) => {
       if (Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 4) return;
       const n = findAt(e.clientX, e.clientY);
+      if (!n && !live.current.compact) {
+        const cl = clusterAt(e.clientX, e.clientY);
+        if (cl) {
+          focusClusterId(cl);
+          return;
+        }
+      }
+      if (focusedCluster.current) {
+        focusedCluster.current = null;
+        requestDraw();
+      }
       live.current.onSelect?.(n ? n.id : null);
       if (n && !live.current.compact) centerOn(n.id);
     };
@@ -734,6 +1251,8 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
         s.stop();
         if (frame.current) cancelAnimationFrame(frame.current);
         frame.current = null;
+        if (breathFrame.current) cancelAnimationFrame(breathFrame.current);
+        breathFrame.current = null;
       } else {
         if (s.alpha() > s.alphaMin()) s.restart();
         requestDraw();
@@ -749,6 +1268,12 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     return () => {
       ro.disconnect();
       s.stop();
+      cancelCamera();
+      if (regionSettle.current) clearTimeout(regionSettle.current);
+      atmos.current?.destroy();
+      atmos.current = null;
+      c.removeEventListener("wheel", onWheelZoom);
+      if (!live.current.compact && (window as any).__mothGraphStats) delete (window as any).__mothGraphStats;
       document.removeEventListener("visibilitychange", onVisibility);
       c.removeEventListener("mousemove", onMove);
       c.removeEventListener("mouseleave", onLeave);
@@ -757,25 +1282,38 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
       c.removeEventListener("dblclick", onDbl);
       c.removeEventListener("contextmenu", onCtx);
       if (frame.current) cancelAnimationFrame(frame.current);
+      if (breathFrame.current) cancelAnimationFrame(breathFrame.current);
       if (ambientTimer.current) clearInterval(ambientTimer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Ambient shimmer only in "full" motion, at a low frame rate, and only while visible.
+  // Ambient life: the atmosphere drifts on its own cheap layer; the graph itself redraws at a low rate only
+  // while something actually breathes (core memories, the selection), and never while hidden.
+  const ambientProp = props.ambient;
   useEffect(() => {
+    const m = props.settings.animate === false ? "minimal" : props.motion ?? motionLevel();
+    const amb = (ambientProp ?? ambientEnabled()) && m !== "minimal";
+    atmos.current?.setOptions({ particles: (ambientProp ?? ambientEnabled()) && !props.compact, drift: amb && !props.compact, fps: m === "full" ? 24 : 12 });
     if (ambientTimer.current) clearInterval(ambientTimer.current);
     ambientTimer.current = null;
-    if ((props.motion ?? motionLevel()) === "full" && props.settings.animate !== false && !props.compact) {
+    if (amb && !props.compact) {
+      // Breathing is a slow ~4 s cycle: 10 updates per second already look smooth (20 in Full).
+      const fps = m === "full" ? 20 : 10;
+      let skip = 0;
       ambientTimer.current = window.setInterval(() => {
-        if (!document.hidden) requestDraw();
-      }, 1000 / 12);
+        if (document.hidden || !breathing.current) return;
+        // Half rate when MOTH isn't the active window, or on a slow machine / huge graph.
+        if (!document.hasFocus() && (skip = (skip + 1) % 2)) return;
+        requestBreath();
+      }, 1000 / fps);
     }
+    requestDraw();
     return () => {
       if (ambientTimer.current) clearInterval(ambientTimer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.motion, props.settings.animate, props.compact]);
+  }, [props.motion, props.settings.animate, props.compact, ambientProp]);
 
   // ------------------------------------------------------------------ incremental data updates
   useEffect(() => {
@@ -798,7 +1336,7 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
       const old = prev.get(d.id);
       const color = st.colorBy === "category" ? CATEGORY_COLOR[d.category] ?? NODE : st.colorBy === "project" ? props.projectColors?.get(d.project_id ?? "") ?? NODE : NODE;
       if (old) {
-        Object.assign(old, d, { x: old.x, y: old.y, r: radius(d, st.nodeSize), color });
+        Object.assign(old, d, { x: old.x, y: old.y, r: radius(d, st.nodeSize), color, core: isCore(d) });
         if (d.pinned && d.x != null && d.y != null && old.fx == null) {
           old.fx = old.x;
           old.fy = old.y;
@@ -810,7 +1348,7 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
         next.set(d.id, old);
         continue;
       }
-      const n = { ...d, x: undefined, y: undefined, r: radius(d, st.nodeSize), color, glow: 0, hi: 0, dim: 0, grow: 0, appearAt: 0, pulseAt: 0, phase: Math.random() * Math.PI * 2 } as SimNode;
+      const n = { ...d, x: undefined, y: undefined, r: radius(d, st.nodeSize), color, glow: 0, hi: 0, dim: 0, grow: 0, appearAt: 0, pulseAt: 0, phase: Math.random() * Math.PI * 2, core: isCore(d) } as SimNode;
       if (d.x != null && d.y != null) {
         n.x = d.x;
         n.y = d.y;
@@ -927,11 +1465,14 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.bloom]);
 
-  useEffect(requestDraw, [props.selectedId, props.highlight, props.motion, props.settings.showLabels, props.settings.textFadeThreshold, props.settings.linkThickness, props.settings.showArrows]);
+  useEffect(requestDraw, [props.selectedId, props.highlight, props.motion, props.clusters, props.settings.showLabels, props.settings.textFadeThreshold, props.settings.linkThickness, props.settings.showArrows]);
 
   return (
     <div ref={wrap} className="absolute inset-0 overflow-hidden" style={{ background: BG }}>
-      <canvas ref={canvas} className="block" aria-label="Knowledge graph" role="img" />
+      <canvas ref={moteCanvas} className="pointer-events-none absolute inset-0 block" aria-hidden="true" />
+      <canvas ref={regionCanvas} className="pointer-events-none absolute inset-0 block transition-opacity duration-300" aria-hidden="true" />
+      <canvas ref={breathCanvas} className="pointer-events-none absolute inset-0 block" aria-hidden="true" />
+      <canvas ref={canvas} className="relative block" aria-label="Knowledge graph" role="img" />
     </div>
   );
 });

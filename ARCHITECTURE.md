@@ -178,3 +178,31 @@ Tray menu: Open MOTH, Open The Mind, Open Cortex, Quick Capture, Pause/Resume Le
 - **Motion level** (`appearance.motion`: Automatic/Full/Balanced/Minimal; Automatic follows Windows' reduce-animations setting).
 - **Startup:** inline SVG/CSS splash in `index.html` (light → moth unfolds → motes → fade), dismissed by `lib/splash.ts` as soon as the app is ready (never delays it), with a calm "waking up" state if the engine is slow; skipped for the Quick Capture window.
 - **Cortex activity** (`components/CortexPulse.tsx`): wing-beat indicator only while the runtime/queue/install is really busy; real install progress; done/error states.
+
+## v0.3.0 — The Mind 2.0: Living Atmosphere
+
+- **Layers** (bottom → top, all under `GraphCanvas`): the container's CSS background image is the static
+  backdrop (`graph/atmosphere.ts`: charcoal `#0E0E13`, three faint radial lights, vignette, 4 % grain tile —
+  painted once per size, never per frame); a transparent particle canvas (36–140 motes by area, very slow drift,
+  parallax with the camera, dirty-rectangle redraws, 12 fps Balanced / 24 fps Full, half rate when the window
+  isn't focused); a cluster-region canvas; a "breathing" canvas; the graph canvas (transparent). All decorative
+  layers have `pointer-events: none`.
+- **Clusters** = real projects with ≥ 3 visible memories. Centre = mean position, radius = 85th-percentile
+  distance × 1.12 + 26 (outliers don't inflate it); targets are recomputed only when positions change and eased
+  (~240 ms). Regions are painted on their own layer only when they change; during camera moves that layer is
+  moved with a CSS transform and repainted 140 ms after the camera stops; dimming on focus is a CSS opacity
+  change. Names are drawn in screen space, fade as memory labels take over, and are clickable (glide to the
+  cluster + soft boundary ring).
+- **Nodes:** cores are white / grey / muted lavender by importance (`coreColor`); "core" memories (starred,
+  project hubs, importance ≥ 0.85) carry a little more steady light. The *varying* part of breathing (core
+  memories, the selected memory) and the light flowing along the selected memory's connections are drawn on the
+  breathing layer at 10 fps (20 in Full), so idle frames never redraw the whole graph (measured 0 graph redraws
+  while idle).
+- **Camera:** eased wheel zoom anchored at the pointer (falls back to direct steps automatically if this machine
+  redraws slower than ~35 fps), eased focus/fit; any user gesture cancels a running glide.
+- **Real events only:** create → fade/scale-in + light; link → edge reveal + pulse; update → pulse; cluster
+  change → eased region transition. Driven by the change feed, as in v0.2.6.
+- **Settings:** `appearance.ambient` (Settings → General → "Living atmosphere in The Mind", default on). Off, or
+  motion Minimal / Windows "reduce animations": nothing drifts or breathes (measured 0 redraws while idle).
+- **Smoothness check:** The Mind → graph settings → "Check smoothness" moves the view, zooms and hovers by itself
+  and reports real frames per second on the current computer (`GraphHandle.measure`).

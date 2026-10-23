@@ -1,11 +1,11 @@
 import { Archive, Crosshair, Eye, Focus, Maximize2, Minus, Pencil, Pin, Plus, Search, SlidersHorizontal, Share2, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ContextMenu, Input, Select, Slider, Switch, Tabs } from "../components/ui";
-import { GraphCanvas, type GraphHandle, type GraphNodeData, type GraphSettings } from "../graph/GraphCanvas";
+import { Button, ContextMenu, Input, Select, Slider, Switch, Tabs } from "../components/ui";
+import { GraphCanvas, type GraphHandle, type GraphNodeData, type GraphSettings, type SmoothnessResult } from "../graph/GraphCanvas";
 import { onChanges, rpc } from "../lib/api";
 import { useApp } from "../lib/app";
-import { useMotion } from "../lib/motion";
+import { useAmbient, useMotion } from "../lib/motion";
 import { CATEGORY_COLOR, CATEGORY_LABEL, MEMORY_TYPE_LABEL, RELATION_LABEL, SOURCE_LABEL, cn, debounce } from "../lib/utils";
 
 export type FullGraphSettings = GraphSettings & { showOrphans: boolean; showArchived: boolean; recentDays: number; categories: string[]; projects: string[]; tags: string[]; localDepth: number };
@@ -42,6 +42,7 @@ export function MindPage() {
   const [allTags, setAllTags] = useState<{ tag: string; n: number }[]>([]);
   const [scope, setScope] = useState<string>(params.project ?? "");
   const motion = useMotion();
+  const ambient = useAmbient();
   const graph = useRef<GraphHandle>(null);
   useEffect(() => {
     if (params.project) {
@@ -121,6 +122,10 @@ export function MindPage() {
   }, [query]);
 
   const projectColors = useMemo(() => new Map((data?.projects ?? []).map((p, i) => [p.id, PROJECT_PALETTE[i % PROJECT_PALETTE.length]])), [data?.projects]);
+  // Cluster names come from real projects; stable identity so the graph doesn't redraw for nothing.
+  const clusterKey = JSON.stringify((data?.projects ?? []).map((p: any) => [p.id, p.name]));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const clusterNames = useMemo(() => (data?.projects ?? []).map((p: any) => ({ id: p.id as string, name: p.name as string })), [clusterKey]);
   const savePositions = useMemo(() => debounce((items: any[]) => void rpc("graph.positions", { items }), 800), []);
   const onPositions = (items: { id: string; x: number; y: number; pinned?: boolean }[]) => {
     if (items.length === 1 && items[0].pinned !== undefined) void rpc("graph.positions", { items });
@@ -143,6 +148,8 @@ export function MindPage() {
           highlight={highlight}
           projectColors={projectColors}
           motion={motion}
+          ambient={ambient}
+          clusters={mode === "global" ? clusterNames : undefined}
           onSelect={(id) => select(id)}
           onFocus={(id) => {
             graph.current?.focus(id, 2);
@@ -226,7 +233,7 @@ export function MindPage() {
             <SlidersHorizontal />
           </ToolBtn>
         </div>
-        <AnimatePresence>{panel ? <SettingsPanel s={settings} update={update} projects={data?.projects ?? []} tags={allTags} onClose={() => setPanel(false)} /> : null}</AnimatePresence>
+        <AnimatePresence>{panel ? <SettingsPanel s={settings} update={update} projects={data?.projects ?? []} tags={allTags} onClose={() => setPanel(false)} onMeasure={() => graph.current!.measure()} /> : null}</AnimatePresence>
       </div>
 
       <div className="pointer-events-none absolute bottom-4 left-4 max-w-[360px] text-[12px] text-ink-3">
@@ -306,8 +313,11 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function SettingsPanel({ s, update, projects, tags, onClose }: { s: FullGraphSettings; update: (p: Partial<FullGraphSettings>) => void; projects: any[]; tags: { tag: string; n: number }[]; onClose: () => void }) {
+function SettingsPanel({ s, update, projects, tags, onClose, onMeasure }: { s: FullGraphSettings; update: (p: Partial<FullGraphSettings>) => void; projects: any[]; tags: { tag: string; n: number }[]; onClose: () => void; onMeasure: () => Promise<SmoothnessResult> }) {
   const toggle = (list: string[], v: string) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
+  const [measuring, setMeasuring] = useState(false);
+  const [result, setResult] = useState<SmoothnessResult | null>(null);
+  const [measureErr, setMeasureErr] = useState<string | null>(null);
   return (
     <motion.div
       initial={{ opacity: 0, y: -4 }}
@@ -399,6 +409,35 @@ function SettingsPanel({ s, update, projects, tags, onClose }: { s: FullGraphSet
           <Slider label="Repel force" min={10} max={600} step={5} value={s.repelForce} onChange={(v) => update({ repelForce: v })} />
           <Slider label="Link force" min={0} max={1} step={0.01} value={s.linkForce} onChange={(v) => update({ linkForce: v })} format={(v) => v.toFixed(2)} />
           <Slider label="Link distance" min={10} max={250} step={1} value={s.linkDistance} onChange={(v) => update({ linkDistance: v })} />
+        </Group>
+        <Group title="Smoothness">
+          <p className="text-[11.5px] leading-relaxed text-ink-3">Measures how smoothly The Mind runs on this computer: MOTH moves the view, zooms and hovers by itself for about 5 seconds and counts real frames.</p>
+          <Button
+            size="sm"
+            loading={measuring}
+            onClick={async () => {
+              setMeasuring(true);
+              setMeasureErr(null);
+              try {
+                setResult(await onMeasure());
+              } catch (e) {
+                setMeasureErr((e as Error).message);
+              } finally {
+                setMeasuring(false);
+              }
+            }}
+          >
+            Check smoothness
+          </Button>
+          {result ? (
+            <div className="grid gap-0.5 text-[12px] text-ink-2" data-testid="smoothness-result">
+              <span>Moving: <b className="text-ink">{result.pan.fps} fps</b></span>
+              <span>Zooming: <b className="text-ink">{result.zoom.fps} fps</b></span>
+              <span>Hovering: <b className="text-ink">{result.hover.fps} fps</b></span>
+              <span className="text-ink-3">{result.nodes.toLocaleString()} memories · 60 fps is perfectly smooth, 30+ feels fine.</span>
+            </div>
+          ) : null}
+          {measureErr ? <span className="text-[12px] text-danger">{measureErr}</span> : null}
         </Group>
       </div>
     </motion.div>

@@ -166,7 +166,7 @@ function General({ s, set, onRestartFirstFlight }: SP & { onRestartFirstFlight?:
             <option value="silent">Silent</option>
           </Select>
         </Line>
-        <Line label="Motion" hint={s["appearance.motion"] === "full" ? "All animations, glow and a gentle shimmer in The Mind." : s["appearance.motion"] === "minimal" ? "Essential feedback only: no glow animation, instant transitions." : s["appearance.motion"] === "balanced" ? "Subtle glow and smooth interactions, no ambient effects." : "Balanced, or Minimal when Windows is set to reduce animations."}>
+        <Line label="Motion" hint={s["appearance.motion"] === "full" ? "All animations at their smoothest." : s["appearance.motion"] === "minimal" ? "Essential feedback only: nothing drifts or breathes, instant transitions." : s["appearance.motion"] === "balanced" ? "Smooth interactions with calmer, lighter ambient motion." : "Balanced, or Minimal when Windows is set to reduce animations."}>
           <Select
             value={s["appearance.reduceMotion"] ? "minimal" : s["appearance.motion"]}
             onChange={async (e) => {
@@ -182,6 +182,16 @@ function General({ s, set, onRestartFirstFlight }: SP & { onRestartFirstFlight?:
             <option value="balanced">Balanced</option>
             <option value="minimal">Minimal</option>
           </Select>
+        </Line>
+        <Line label="Living atmosphere in The Mind" hint="Drifting particles, breathing glow on important memories and flowing light on the selected memory's connections. Turn off for a still, quieter graph. Real learning animations stay on.">
+          <Switch
+            checked={s["appearance.ambient"] !== false}
+            onChange={async (v) => {
+              setMotionSetting(s["appearance.reduceMotion"] ? "minimal" : s["appearance.motion"], false, v);
+              await set("appearance.ambient", v);
+            }}
+            label="Living atmosphere in The Mind"
+          />
         </Line>
       </Block>
       <Block title="Updates">

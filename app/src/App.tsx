@@ -44,7 +44,7 @@ function Root() {
   const load = () =>
     rpc<any>("settings.get")
       .then((r) => {
-        setMotionSetting(r.settings["appearance.motion"], !!r.settings["appearance.reduceMotion"]);
+        setMotionSetting(r.settings["appearance.motion"], !!r.settings["appearance.reduceMotion"], r.settings["appearance.ambient"] !== false);
         void setKeepInTray(r.settings["app.closeToTray"] !== false);
         if (r.settings["quickCapture.enabled"])
           void setCaptureShortcut(r.settings["quickCapture.shortcut"] || null).then((err) => {
@@ -169,7 +169,7 @@ function Workspace({ firstMemory, onRestartFirstFlight }: { firstMemory?: string
     return onChanges((changes) => {
       if (changes.some((c) => c.entity === "settings")) {
         void trayRefresh();
-        if (changes.some((c) => c.entity === "settings" && String(c.id).startsWith("appearance."))) void rpc<any>("settings.get").then((r) => setMotionSetting(r.settings["appearance.motion"], !!r.settings["appearance.reduceMotion"]));
+        if (changes.some((c) => c.entity === "settings" && String(c.id).startsWith("appearance."))) void rpc<any>("settings.get").then((r) => setMotionSetting(r.settings["appearance.motion"], !!r.settings["appearance.reduceMotion"], r.settings["appearance.ambient"] !== false));
       }
       if (!changes.some((c) => c.entity === "activity")) return;
       if (lastNotification.current === null) return;
