@@ -68,7 +68,7 @@ export async function download(url: string, dest: string, opts: { sha256: string
         if (done) break;
         hash.update(value);
         received += value.byteLength;
-        if (!out.write(value)) await new Promise((r) => out.once("drain", r));
+        if (!out.write(value)) await new Promise<void>((r) => out.once("drain", () => r()));
         const now = Date.now();
         if (now - lastReport > 250) {
           lastReport = now;

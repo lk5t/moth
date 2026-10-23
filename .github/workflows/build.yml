@@ -35,7 +35,6 @@ jobs:
 
   real-ai:
     name: Real local AI (${{ matrix.os }})
-    needs: test
     strategy:
       fail-fast: false
       matrix:
