@@ -474,7 +474,14 @@ pub fn run() {
     tauri::Builder::default()
         // A second launch (e.g. clicking the shortcut while MOTH runs in the tray) just shows the window:
         // there is only ever one MOTH process and one memory engine.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        // `MOTH.exe --quit` asks the running instance to quit completely (used by scripts and the installer smoke test).
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if args.iter().any(|a| a == "--quit") {
+                quit_completely(app);
+            } else {
+                show_main(app);
+            }
+        }))
         .plugin(tauri_plugin_log::Builder::new().level(log::LevelFilter::Info).build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
@@ -551,6 +558,11 @@ pub fn run() {
             })
             .build(app)?;
 
+            if std::env::args().any(|a| a == "--quit") {
+                // Nothing was running: nothing to quit.
+                app.handle().exit(0);
+                return Ok(());
+            }
             // Started by Windows ("Start with Windows"): stay in the tray, don't open the window.
             // The local model is never loaded at start-up; it loads on demand.
             if std::env::args().any(|a| a == "--minimized") {

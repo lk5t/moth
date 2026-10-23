@@ -147,7 +147,37 @@ jobs:
           if (!$proc) { Get-ChildItem (Join-Path $env:LOCALAPPDATA "app.moth.desktop\logs") -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName }; throw "the desktop app did not start the memory engine" }
           if (!(Test-Path (Join-Path $env:APPDATA "MOTH\moth.db"))) { throw "the brain database was not created" }
           Write-Host "App started the engine (pid $($proc.Id)) and created the brain."
-          Get-Process -Name "MOTH","moth-core" -ErrorAction SilentlyContinue | Stop-Process -Force
+
+          # Background operation: closing the window hides it to the tray; the engine keeps running.
+          $ui = Get-Process -Name "MOTH" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($ui) { [void]$ui.CloseMainWindow() }
+          Start-Sleep -Seconds 4
+          if (!(Get-Process -Name "MOTH" -ErrorAction SilentlyContinue)) { throw "closing the window quit the app instead of hiding it to the tray" }
+          if (!(Get-Process -Name "moth-core" -ErrorAction SilentlyContinue)) { throw "the memory engine stopped when the window was hidden" }
+          Write-Host "Window close hid MOTH to the tray; the engine is still running."
+
+          # MCP stays available while MOTH runs in the background (Claude launches its own server process).
+          & $core self-test
+          if ($LASTEXITCODE -ne 0) { throw "MCP self-test failed while MOTH was in the tray" }
+
+          # Only one engine: launching MOTH again must not start a second app or engine.
+          Start-Process $app.FullName
+          Start-Sleep -Seconds 5
+          $cores = @(Get-Process -Name "moth-core" -ErrorAction SilentlyContinue | Where-Object { $_.Id -eq $proc.Id -or $_.StartTime -gt (Get-Date).AddMinutes(-1) })
+          $engines = @(Get-Process -Name "moth-core" -ErrorAction SilentlyContinue).Count
+          Write-Host "moth-core processes after second launch: $engines"
+
+          # Quit MOTH completely: everything owned by the app must stop, with a clean engine shutdown.
+          Start-Process $app.FullName -ArgumentList "--quit"
+          $deadline = (Get-Date).AddSeconds(30)
+          while ((Get-Date) -lt $deadline -and (Get-Process -Name "MOTH","moth-core","llama-server" -ErrorAction SilentlyContinue)) { Start-Sleep -Milliseconds 500 }
+          $left = Get-Process -Name "MOTH","moth-core","llama-server" -ErrorAction SilentlyContinue
+          if ($left) { $left | Format-Table Name, Id; throw "processes were left running after Quit MOTH Completely" }
+          $logs = Get-ChildItem (Join-Path $env:APPDATA "MOTH\logs") -Filter "moth-core*" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $clean = Select-String -Path $logs.FullName -Pattern "Clean shutdown" -Quiet
+          if (!$clean) { Get-Content $logs.FullName -Tail 30; throw "the engine did not report a clean shutdown" }
+          Write-Host "Quit completely: no MOTH, engine or model processes left; engine shut down cleanly."
+          if ($engines -gt 1) { throw "a second launch started another memory engine ($engines running)" }
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
