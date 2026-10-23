@@ -26,14 +26,12 @@ jobs:
         working-directory: core
         run: npm run typecheck
       - name: Engine tests (memory engine, MCP protocol with the official SDK, API, recovery)
-        working-directory: core
-        run: npm test
+        run: .github/ci-run.sh "Engine tests" npm --prefix core test
       - name: Install UI dependencies
         working-directory: app
         run: npm install --no-audit --no-fund
       - name: Type-check and build UI
-        working-directory: app
-        run: npm run build
+        run: .github/ci-run.sh "UI build" npm --prefix app run build
 
   windows:
     name: Windows installer
@@ -57,14 +55,15 @@ jobs:
           npm --prefix app install --no-audit --no-fund
 
       - name: Engine tests on Windows
-        working-directory: core
-        run: npm test
+        shell: bash
+        run: .github/ci-run.sh "Windows engine tests" npm --prefix core test
 
       - name: Build memory engine sidecar (Node single executable)
-        working-directory: core
+        shell: bash
         run: |
-          npm run bundle
-          npm run sea
+          cd core
+          ../.github/ci-run.sh "Bundle engine" npm run bundle
+          ../.github/ci-run.sh "Build sidecar exe" npm run sea
 
       - name: Verify sidecar executable
         shell: pwsh
@@ -77,16 +76,20 @@ jobs:
           & $exe status
 
       - name: Build UI
-        run: npm --prefix app run build
+        shell: bash
+        run: .github/ci-run.sh "UI build" npm --prefix app run build
 
       - name: Generate icons
-        run: npx tauri icon src-tauri/app-icon.png
+        shell: bash
+        run: .github/ci-run.sh "Icons" npx tauri icon src-tauri/app-icon.png
 
       - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --release
+        shell: bash
+        run: .github/ci-run.sh "Rust compile/tests" cargo test --manifest-path src-tauri/Cargo.toml --release
 
       - name: Build installer
-        run: npx tauri build
+        shell: bash
+        run: .github/ci-run.sh "Installer build" npx tauri build
 
       - name: Install on this clean runner and smoke-test
         shell: pwsh
