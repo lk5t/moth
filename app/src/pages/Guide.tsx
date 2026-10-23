@@ -5,7 +5,7 @@ import { Button, Kbd, PageHeader } from "../components/ui";
 import { rpc } from "../lib/api";
 import { useApp } from "../lib/app";
 
-export function GuidePage({ onRestartFirstFlight }: { onRestartFirstFlight?: () => void }) {
+export function GuidePage({ onRestartFirstFlight }: { onRestartFirstFlight?: () => void } = {}) {
   const { go, toast } = useApp();
   return (
     <div className="h-full overflow-y-auto">

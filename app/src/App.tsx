@@ -44,7 +44,10 @@ function Root() {
       .then((r) => {
         document.documentElement.classList.toggle("reduce-motion", !!r.settings["appearance.reduceMotion"]);
         void setKeepInTray(r.settings["app.closeToTray"] !== false);
-        void setCaptureShortcut(r.settings["quickCapture.enabled"] ? r.settings["quickCapture.shortcut"] || null : null);
+        if (r.settings["quickCapture.enabled"])
+          void setCaptureShortcut(r.settings["quickCapture.shortcut"] || null).then((err) => {
+            if (err) window.dispatchEvent(new CustomEvent("moth-shortcut-error", { detail: r.settings["quickCapture.shortcut"] }));
+          });
         setState(r.settings["onboarding.completed"] ? "ready" : "onboarding");
       })
       .catch((e) => {
@@ -127,6 +130,13 @@ function Workspace({ firstMemory, onRestartFirstFlight }: { firstMemory?: string
       }),
     [go, select],
   );
+  // The Quick Capture shortcut can be taken by another app: say so instead of failing silently.
+  useEffect(() => {
+    const fn = (e: Event) =>
+      toast({ kind: "error", text: `The Quick Capture shortcut ${(e as CustomEvent).detail} is already used by another app. Choose another one in Settings → General.`, action: { label: "Change", run: () => go("settings") } });
+    window.addEventListener("moth-shortcut-error", fn);
+    return () => window.removeEventListener("moth-shortcut-error", fn);
+  }, [toast, go]);
   // In a browser (no tray), "Quick Capture" opens an inline dialog.
   useEffect(() => {
     const fn = () => setCaptureOpen(true);
@@ -165,7 +175,8 @@ function Workspace({ firstMemory, onRestartFirstFlight }: { firstMemory?: string
     });
   }, [toast]);
 
-  const pages: Record<Page, () => ReactElement> = {
+  // Stable component types: an inline arrow here would remount the page (losing its state) on every render.
+  const pages: Record<Page, (props: { onRestartFirstFlight: () => void }) => ReactElement> = {
     overview: OverviewPage,
     mind: MindPage,
     memories: MemoriesPage,
@@ -178,15 +189,15 @@ function Workspace({ firstMemory, onRestartFirstFlight }: { firstMemory?: string
     timeline: TimelinePage,
     activity: ActivityPage,
     connections: ConnectionsPage,
-    settings: () => <SettingsPage onRestartFirstFlight={onRestartFirstFlight} />,
-    guide: () => <GuidePage onRestartFirstFlight={onRestartFirstFlight} />,
+    settings: SettingsPage,
+    guide: GuidePage,
   };
   const Page = pages[page];
   return (
     <div className="flex min-h-0 flex-1">
       <Sidebar />
       <main className="relative min-w-0 flex-1" id="main">
-        <Page key={page === "projects" ? `${page}-${app.params.id ?? ""}` : page} />
+        <Page key={page === "projects" ? `${page}-${app.params.id ?? ""}` : page} onRestartFirstFlight={onRestartFirstFlight} />
       </main>
       <MemoryPanel />
       <CommandPalette />

@@ -98,7 +98,7 @@ export function pulse(brain: Brain): Row {
       profile: brain.settings.get("resources.profile"),
       defer_reason: brain.deferReason(),
       sleep: { mode: brain.settings.get("sleep.mode"), last_run: brain.settings.get("sleep.lastRun") || null },
-      backup: { last_ok: brain.settings.get("backup.lastOk") || null, last_error: brain.settings.get("backup.lastError") || null },
+      backup: { last_ok: brain.lastBackupAt(), last_error: brain.settings.get("backup.lastError") || null },
     },
     feed,
   };

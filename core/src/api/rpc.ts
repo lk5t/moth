@@ -343,7 +343,7 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
     "backup.create": () => b().backup("manual"),
     "backup.list": () => b().listBackups(),
     "backup.inspect": (p: { name: string }) => b().inspectBackup(req(p.name, "name")),
-    "backup.status": () => ({ auto: b().settings.get("backup.auto"), keep: b().settings.get("backup.keep"), interval_hours: b().settings.get("backup.intervalHours"), folder: b().backupDir(), default_folder: b().paths.backups, last_ok: b().settings.get("backup.lastOk") || null, last_error: b().settings.get("backup.lastError") || null }),
+    "backup.status": () => ({ auto: b().settings.get("backup.auto"), keep: b().settings.get("backup.keep"), interval_hours: b().settings.get("backup.intervalHours"), folder: b().backupDir(), default_folder: b().paths.backups, last_ok: b().lastBackupAt(), last_error: b().settings.get("backup.lastError") || null }),
     "backup.restore": (p: { name: string }) => {
       const r = b().stageRestore(req(p.name, "name"));
       c.reopen();

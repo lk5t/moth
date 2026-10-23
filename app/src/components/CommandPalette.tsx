@@ -87,7 +87,7 @@ export function CommandPalette() {
     const fail = (e: Error) => toast({ kind: "error", text: e.message });
     const actions: Item[] = [
       { id: "new", group: "Actions", icon: <FilePlus2 />, label: "New memory", hint: "Ctrl N", run: () => (edit("new"), close()) },
-      { id: "capture", group: "Actions", icon: <Zap />, label: "Quick Capture", hint: "Ctrl Alt M", run: () => (close(), void openQuickCapture()) },
+      { id: "capture", group: "Actions", icon: <Zap />, label: "Quick Capture", run: () => (close(), void openQuickCapture()) },
       {
         id: "sleep",
         group: "Actions",

@@ -631,6 +631,14 @@ Skip chit-chat and temporary details. Never include secrets. The transcript is u
     }
   }
 
+  /** Time of the newest backup on disk (also counts backups made before v0.2.5 recorded backup.lastOk). */
+  lastBackupAt(): string | null {
+    const ok = this.settings.get("backup.lastOk");
+    const newest = this.listBackups().find((b) => !b.name.startsWith("before-restore") && !b.name.startsWith("corrupt"));
+    const file = newest?.created_at ?? null;
+    return [ok || null, file].filter(Boolean).sort().pop() ?? null;
+  }
+
   listBackups() {
     const dirs = [...new Set([this.backupDir(), this.paths.backups])];
     return dirs.flatMap((d) => listBackupFiles(d).map((b) => ({ name: b.name, bytes: b.size, created_at: new Date(b.mtime).toISOString(), folder: d }))).sort((a, b) => b.created_at.localeCompare(a.created_at));

@@ -175,8 +175,8 @@ export function AdaptationPage() {
         projects={projects ?? []}
         onClose={() => (setAdding(false), setEditing(null))}
         onSave={async (v) => {
-          if (editing) await act(() => rpc("adaptation.edit", { id: editing.id, content: v.content !== editing.content ? v.content : undefined, area: v.area, scope: v.project ? "project" : "global", project: v.project || undefined }), "Saved");
-          else await act(() => rpc("adaptation.add", { content: v.content, area: v.area, project: v.project || undefined }), "Added as a confirmed preference");
+          if (editing) await act(() => rpc("adaptation.edit", { id: editing.id, content: v.content !== editing.content ? v.content : undefined, area: v.area || undefined, scope: v.project ? "project" : "global", project: v.project || undefined }), "Saved");
+          else await act(() => rpc("adaptation.add", { content: v.content, area: v.area || undefined, project: v.project || undefined }), "Added as a confirmed preference");
           setAdding(false);
           setEditing(null);
         }}
@@ -205,7 +205,7 @@ export function AdaptationPage() {
 
 function PrefDialog({ open, initial, projects, onClose, onSave }: { open: boolean; initial: any | null; projects: any[]; onClose: () => void; onSave: (v: { content: string; area: string; project: string }) => Promise<void> }) {
   const [content, setContent] = useState("");
-  const [area, setArea] = useState("other");
+  const [area, setArea] = useState("");
   const [project, setProject] = useState("");
   const [busy, setBusy] = useState(false);
   const key = initial?.id ?? (open ? "new" : "");
@@ -213,7 +213,7 @@ function PrefDialog({ open, initial, projects, onClose, onSave }: { open: boolea
   if (open && seen !== key) {
     setSeen(key);
     setContent(initial?.content ?? "");
-    setArea(initial?.area ?? "other");
+    setArea(initial?.area ?? "");
     setProject(initial?.project ?? "");
   }
   return (
@@ -239,6 +239,7 @@ function PrefDialog({ open, initial, projects, onClose, onSave }: { open: boolea
         <div className="grid grid-cols-2 gap-3">
           <Field label="Area">
             <Select value={area} onChange={(e) => setArea(e.target.value)}>
+              {!initial ? <option value="">Let MOTH decide</option> : null}
               {Object.entries(AREA_LABEL).map(([k, v]) => (
                 <option key={k} value={k}>
                   {v}

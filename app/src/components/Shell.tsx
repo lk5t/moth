@@ -102,6 +102,8 @@ export function Sidebar() {
   const { data: sys, reload: reloadSys } = useLive<any>("system.state", {}, { entities: ["settings" as any] });
   const [more, setMore] = useState(() => MORE.some((m) => m.page === page));
   const pending = Number(counts?.pending ?? 0);
+  const { data: settings } = useLive<any>("settings.get", {}, { entities: ["settings" as any] });
+  const shortcut = settings?.settings?.["quickCapture.enabled"] ? String(settings.settings["quickCapture.shortcut"] ?? "").replace(/\+/g, " ") : "";
   const item = (n: NavItem) => (
     <button
       key={n.page}
@@ -172,7 +174,7 @@ export function Sidebar() {
         {!collapsed ? (
           <button onClick={() => void openQuickCapture()} className="mb-2 flex h-8 w-full items-center gap-2 rounded-[8px] border border-line px-2.5 text-[12.5px] text-ink-2 hover:border-line-strong hover:text-ink [&_svg]:size-4">
             <Zap className="text-accent-soft" /> Quick Capture
-            <span className="ml-auto text-[10.5px] text-ink-3">Ctrl Alt M</span>
+            {shortcut ? <span className="ml-auto text-[10.5px] text-ink-3">{shortcut}</span> : null}
           </button>
         ) : null}
         {!collapsed && stats ? (
