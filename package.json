@@ -1,0 +1,16 @@
+{
+  "name": "moth",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MOTH — a self-evolving second brain for Claude (Tauri 2 desktop app)",
+  "scripts": {
+    "tauri": "tauri",
+    "build:core": "npm --prefix core run bundle && npm --prefix core run sea",
+    "build:app": "npm --prefix app run build",
+    "build": "npm run build:core && npm run build:app && tauri build",
+    "test": "npm --prefix core test"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.5.0"
+  }
+}
