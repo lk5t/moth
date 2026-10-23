@@ -53,15 +53,19 @@ class McpClient {
     }
     return { data, isError: !!r.result.isError, raw: r };
   }
-  close() {
+  /** Graceful close (like a client disconnecting): end stdin and wait for the server to exit. */
+  async close(): Promise<void> {
+    if (this.proc.exitCode !== null) return;
+    const exited = new Promise<void>((r) => this.proc.once("exit", () => r()));
     this.proc.stdin.end();
-    this.proc.kill();
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
+    if (this.proc.exitCode === null) this.proc.kill();
   }
 }
 
 const live = new Set<McpClient>();
-after(() => {
-  for (const c of live) c.close();
+after(async () => {
+  for (const c of live) await c.close();
 });
 
 async function startClient(dataDir: string): Promise<McpClient> {
@@ -89,7 +93,7 @@ test("MCP: lists all 15 tools with schemas", async () => {
   }
   const commit = r.result.tools.find((t: any) => t.name === "moth_commit_learning");
   assert.ok(commit.inputSchema.required.includes("summary"));
-  c.close();
+  await c.close();
 });
 
 test("MCP: full learning workflow survives a restart (acceptance scenario)", async () => {
@@ -121,7 +125,7 @@ test("MCP: full learning workflow survives a restart (acceptance scenario)", asy
   assert.ok(commit.data.actions.length >= 3);
   const ended = await c.call("moth_end_task", { task_id: taskId });
   assert.equal(ended.data.learning_committed, true);
-  c.close();
+  await c.close();
 
   // "Application restarts" → knowledge remains available to a new session.
   c = await startClient(dir);
@@ -137,11 +141,12 @@ test("MCP: full learning workflow survives a restart (acceptance scenario)", asy
   assert.ok(related.data.relationships.some((r: any) => r.type === "SOLVES"));
   const status = await c.call("moth_get_brain_status", {});
   assert.ok(status.data.memories > 10);
-  c.close();
+  await c.close();
 
   // Activity + MCP session were recorded for the Connections page.
   const b = Brain.open({ dataDir: dir, role: "test" });
-  assert.ok(Number(b.db.value("SELECT COUNT(*) FROM activity_logs WHERE kind = 'mcp_call'")) >= 6);
+  const calls = b.db.all("SELECT kind, source, action, status FROM activity_logs ORDER BY id");
+  assert.ok(calls.filter((x: any) => x.kind === "mcp_call").length >= 6, JSON.stringify(calls));
   assert.ok(b.db.value("SELECT 1 FROM mcp_clients WHERE client_name = 'claude-test-client'"));
   b.close();
 });
@@ -190,7 +195,7 @@ test("MCP: CRUD tools, validation errors, locked memories and permissions", asyn
   assert.match(JSON.stringify(denied.data), /permission_denied/);
   const stillReads = await c.call("moth_get_brain_status", {});
   assert.equal(stillReads.isError, false);
-  c.close();
+  await c.close();
 });
 
 test("MCP: merge and link tools", async () => {
@@ -206,5 +211,5 @@ test("MCP: merge and link tools", async () => {
   assert.ok(rel.data.related.some((r: any) => r.id === x.data.id));
   const rc = await c.call("moth_get_relevant_context", { query: "how does luck work" });
   assert.ok(rc.data.stats.items >= 1);
-  c.close();
+  await c.close();
 });
