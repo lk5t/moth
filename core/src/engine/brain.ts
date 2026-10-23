@@ -6,6 +6,7 @@ import { SCHEMA_VERSION } from "../db/migrations.ts";
 import { log } from "../logger.ts";
 import { paths as makePaths, type MothPaths } from "../paths.ts";
 import { AnthropicClient, Secrets } from "./ai.ts";
+import { Cortex } from "../cortex/cortex.ts";
 import { buildContext, contextIds, type ContextPackage } from "./context.ts";
 import { createRemoteProvider, vecToBlob } from "./embeddings.ts";
 import { JobQueue } from "./jobs.ts";
@@ -32,6 +33,7 @@ export class Brain {
   readonly learning: LearningEngine;
   readonly meta: Metamorphosis;
   readonly jobs: JobQueue;
+  readonly cortex: Cortex;
   readonly paths: MothPaths;
   readonly role: BrainOptions["role"];
   recovered: string | null = null;
@@ -55,6 +57,7 @@ export class Brain {
     this.learning = new LearningEngine(this.store, this.search, this.ai);
     this.meta = new Metamorphosis(this.store, this.search, this.learning, this.ai);
     this.jobs = new JobQueue(this.db);
+    this.cortex = new Cortex(this);
     this.refreshEmbeddingProvider();
     if (this.recovered) {
       this.store.logActivity({ kind: "system", source: "core", action: "recovery", status: "error", detail: { message: this.recovered } });
@@ -103,6 +106,7 @@ export class Brain {
   }
 
   close(): void {
+    this.cortex.shutdown();
     this.stopBackground();
     this.db.close();
   }
@@ -122,6 +126,7 @@ export class Brain {
       this.db.run("UPDATE mcp_clients SET status = 'disconnected' WHERE status = 'connected' AND last_seen_at < ?", [new Date(Date.now() - 10 * 60_000).toISOString()]);
       return { ok: true };
     });
+    this.cortex.registerJobs();
     j.start();
     const schedule = () => {
       const minutes = Math.max(5, this.settings.get("automation.reflectIntervalMin"));

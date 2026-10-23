@@ -82,11 +82,11 @@ async function startClient(dataDir: string): Promise<McpClient> {
   return c;
 }
 
-test("MCP: lists all 15 tools with schemas", async () => {
+test("MCP: lists all 19 tools with schemas", async () => {
   const c = await startClient(tmpDir());
   const r = await c.request("tools/list");
   const names = r.result.tools.map((t: any) => t.name).sort();
-  assert.equal(names.length, 15);
+  assert.equal(names.length, 19);
   for (const t of r.result.tools) {
     assert.equal(t.inputSchema.type, "object");
     assert.ok(t.description.length > 20);

@@ -186,6 +186,16 @@ export class SearchEngine {
       ? new Set(this.db.all<Row>("SELECT memory_id FROM project_memories WHERE project_id = ?", [boostProject]).map((r) => r.memory_id as string))
       : null;
 
+    // Retrieval learning: explicit "useful / not useful" feedback nudges ranking (bounded, ±0.04).
+    const fb = new Map<string, number>();
+    if (mems.length) {
+      try {
+        for (const r of this.db.all<Row>(`SELECT memory_id, SUM(CASE WHEN useful = 1 THEN 1 ELSE -1 END) AS net, COUNT(*) AS n FROM retrieval_feedback WHERE memory_id IN (${mems.map(() => "?").join(",")}) GROUP BY memory_id`, mems.map((m) => m.id)))
+          fb.set(r.memory_id as string, Math.max(-1, Math.min(1, Number(r.net) / Math.max(3, Number(r.n)))));
+      } catch {
+        /* table missing on very old databases */
+      }
+    }
     const out: ScoredMemory[] = [];
     for (const m of mems) {
       const status = filters.status ?? "active";
@@ -215,6 +225,7 @@ export class SearchEngine {
       let score =
         WEIGHTS.semantic * signals.semantic + WEIGHTS.keyword * signals.keyword + WEIGHTS.project * signals.project + WEIGHTS.graph * signals.graph +
         WEIGHTS.importance * signals.importance + WEIGHTS.recency * signals.recency + WEIGHTS.confidence * signals.confidence;
+      score += 0.04 * (fb.get(m.id) ?? 0);
       if (m.flags.includes("possible_prompt_injection")) score *= 0.7;
       if (m.verification === "disputed") score *= 0.8;
       score = Math.min(1, score);
@@ -226,6 +237,7 @@ export class SearchEngine {
       if (signals.graph > 0) why.push("connected to a strong match");
       if (signals.recency > 0.8) why.push("recent");
       if (m.importance >= 0.75) why.push("important");
+      if ((fb.get(m.id) ?? 0) > 0) why.push("marked useful before");
       out.push({ memory: m, score: Math.round(score * 1000) / 1000, signals, why });
     }
     out.sort((a, b) => b.score - a.score);

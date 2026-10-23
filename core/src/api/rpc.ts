@@ -202,7 +202,14 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
     timeline: (p: any = {}) => b().store.listEvents({ limit: p.limit ?? 200, since: p.since, until: p.until, project_id: p.project_id, kinds: p.kinds, before_id: p.before_id }),
     activity: (p: any = {}) => b().store.listActivity({ limit: p.limit ?? 200, kind: p.kind, before_id: p.before_id }),
     "tasks.list": (p: any = {}) => b().db.all("SELECT t.*, p.name AS project_name FROM tasks t LEFT JOIN projects p ON p.id = t.project_id WHERE t.user_id = ? ORDER BY started_at DESC LIMIT ?", [b().store.userId, p.limit ?? 50]),
-    "learning.revert": (p: { id: number }) => b().store.revertEvent(Number(p.id), user("Reverted in MOTH")),
+    "learning.revert": (p: { id: number }) => {
+      const br = b();
+      const ev = br.db.get<Row>("SELECT * FROM learning_events WHERE id = ?", [Number(p.id)]);
+      const r = br.store.revertEvent(Number(p.id), user("Reverted in MOTH"));
+      // Feedback learning: undoing an automatic decision tells MOTH it was wrong.
+      if (ev && ev.actor === "moth") br.cortex.recordFeedback({ subject_type: "learning_event", subject_id: String(p.id), verdict: "incorrect", operation: String(ev.kind), statement: String(ev.description), note: "Undone by the user" });
+      return r;
+    },
     "jobs.list": () => ({ jobs: b().jobs.list(100), counts: b().jobs.counts() }),
     "jobs.cancel": (p: { id: number }) => ({ ok: b().jobs.cancel(Number(p.id)) }),
     "jobs.retry": (p: { id: number }) => ({ ok: b().jobs.retry(Number(p.id)) }),
@@ -210,6 +217,32 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
     "meta.growth": (p: { days?: number } = {}) => b().meta.growth(Math.max(7, Math.min(p?.days ?? 30, 365))),
     "meta.reflect": async () => b().meta.reflect(),
     "automation.pause": (p: { paused: boolean }) => (b().settings.set("automation.paused", !!p.paused), { paused: !!p.paused }),
+
+    // ---------------------------------------------------------------- cortex (local intelligence)
+    "cortex.status": () => b().cortex.status(),
+    "cortex.plan": (p: { modelId?: string } = {}) => b().cortex.installPlan(p?.modelId),
+    "cortex.hardware": () => b().cortex.hardware(true),
+    "cortex.install": (p: { modelId: string; consent: boolean }) => b().cortex.startInstall(req(p.modelId, "modelId"), p.consent === true),
+    "cortex.cancelInstall": () => (b().cortex.cancelInstall(), { ok: true }),
+    "cortex.removeModel": (p: { id: string }) => b().cortex.removeModel(req(p.id, "id")),
+    "cortex.selectModel": async (p: { id: string }) => {
+      const br = b();
+      if (!br.db.get("SELECT 1 FROM ai_components WHERE id = ? AND kind = 'model'", [p.id])) throw new MothError("not_found", "Install that model first");
+      br.settings.set("cortex.modelId", p.id);
+      await br.cortex.unload();
+      return { selected: p.id };
+    },
+    "cortex.verify": () => b().cortex.verifyInstalled(),
+    "cortex.load": async () => (await b().cortex.load(), b().cortex.status()),
+    "cortex.unload": async () => (await b().cortex.unload(), { ok: true }),
+    "cortex.pause": (p: { paused: boolean }) => (b().settings.set("cortex.paused", !!p.paused), { paused: !!p.paused }),
+    "cortex.learn": (p: { text: string; project?: string; analyze_only?: boolean }) => ({ job_id: b().cortex.enqueueLearn({ text: req(p.text, "text"), project: p.project || null, source: "user", analyze_only: !!p.analyze_only }, "app") }),
+    "cortex.job": async (p: { id: number; wait?: number }) => (await b().cortex.waitForJob(Number(p.id), Math.min(Number(p.wait ?? 0), 25) * 1000)) ?? { id: p.id, status: "pending" },
+    "cortex.reviews": (p: { status?: string } = {}) => b().cortex.listReviews(p?.status ?? "pending"),
+    "cortex.approve": (p: { id: number; content?: string; title?: string }) => b().cortex.approve(Number(p.id), { content: p.content, title: p.title }),
+    "cortex.reject": (p: { id: number; note?: string; verdict?: "incorrect" | "irrelevant" | "keep_separate" }) => b().cortex.reject(Number(p.id), p.note, p.verdict),
+    "cortex.feedback": (p: { subject_type: any; subject_id: string; verdict: string; note?: string }) => ({ id: b().cortex.recordFeedback({ subject_type: p.subject_type, subject_id: String(p.subject_id), verdict: p.verdict, note: p.note }) }),
+    "cortex.retrievalFeedback": (p: { query?: string; useful?: string[]; not_useful?: string[] }) => ({ recorded: b().cortex.recordRetrievalFeedback({ ...p, source: "user" }) }),
 
     // ---------------------------------------------------------------- connections
     "connections.status": () => ({ ...connectionStatus(b()), http_running: c.httpMcpRunning(), http_token: b().settings.get("mcp.http.token") || null }),

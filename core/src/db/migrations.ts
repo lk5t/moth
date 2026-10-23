@@ -301,6 +301,83 @@ CREATE TRIGGER trg_fts_upd AFTER UPDATE OF title, content, summary, tags ON memo
 END;
 `,
   },
+  {
+    version: 2,
+    name: "cortex: review queue, feedback, installed AI components",
+    sql: `
+-- Proposals from Cortex that need the user's decision (balanced autonomy).
+CREATE TABLE review_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','applied','failed','expired')),
+  operation TEXT NOT NULL,
+  target_memory_id TEXT,
+  proposal TEXT NOT NULL,
+  statement TEXT NOT NULL,
+  relation TEXT,
+  reason TEXT NOT NULL,
+  risk TEXT NOT NULL,
+  confidence REAL,
+  provider TEXT,
+  model TEXT,
+  source TEXT,
+  source_ref TEXT,
+  task_id TEXT,
+  job_id INTEGER,
+  result TEXT,
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  decided_by TEXT
+);
+CREATE INDEX idx_review_status ON review_queue(user_id, status, id DESC);
+CREATE TRIGGER trg_review_ins AFTER INSERT ON review_queue BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('review', CAST(NEW.id AS TEXT), 'insert');
+END;
+CREATE TRIGGER trg_review_upd AFTER UPDATE OF status ON review_queue BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('review', CAST(NEW.id AS TEXT), 'update');
+END;
+
+-- Feedback learning: the user's verdicts on MOTH's memory decisions, retrieved as examples later.
+CREATE TABLE feedback (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  subject_type TEXT NOT NULL CHECK (subject_type IN ('review','learning_event','relationship','memory')),
+  subject_id TEXT NOT NULL,
+  verdict TEXT NOT NULL CHECK (verdict IN ('correct','incorrect','irrelevant','keep_separate','should_merge','useful','not_useful')),
+  operation TEXT,
+  statement TEXT,
+  note TEXT,
+  context TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_feedback_user ON feedback(user_id, created_at DESC);
+
+-- Retrieval learning: was a retrieved memory useful for a task? (explicit signals only)
+CREATE TABLE retrieval_feedback (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  task_id TEXT,
+  query TEXT,
+  useful INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_rf_memory ON retrieval_feedback(memory_id);
+
+-- Installed local AI components (runtime builds and GGUF models), verified by SHA-256.
+CREATE TABLE ai_components (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('runtime','model')),
+  version TEXT NOT NULL,
+  path TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  verified INTEGER NOT NULL DEFAULT 0,
+  installed_at TEXT NOT NULL
+);
+`,
+  },
 ];
 
 export function runMigrations(db: Database): void {
