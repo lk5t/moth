@@ -9,6 +9,7 @@ import { rpc } from "../lib/api";
 import { cn } from "../lib/utils";
 import { Kbd } from "./ui";
 import { MothMark } from "./MothLogo";
+import { cortexActivity } from "./CortexPulse";
 
 type NavItem = { page: Page; label: string; icon: ReactNode; key: string };
 
@@ -102,6 +103,8 @@ export function Sidebar() {
   const { data: sys, reload: reloadSys } = useLive<any>("system.state", {}, { entities: ["settings" as any] });
   const [more, setMore] = useState(() => MORE.some((m) => m.page === page));
   const pending = Number(counts?.pending ?? 0);
+  const { data: cortex } = useLive<any>("cortex.status", {}, { entities: ["cortex" as any] });
+  const cortexBusy = cortexActivity(cortex).kind === "busy";
   const { data: settings } = useLive<any>("settings.get", {}, { entities: ["settings" as any] });
   const shortcut = settings?.settings?.["quickCapture.enabled"] ? String(settings.settings["quickCapture.shortcut"] ?? "").replace(/\+/g, " ") : "";
   const item = (n: NavItem) => (
@@ -111,14 +114,15 @@ export function Sidebar() {
       title={collapsed ? `${n.label}${n.key ? ` (Ctrl+${n.key})` : ""}` : undefined}
       aria-current={page === n.page ? "page" : undefined}
       className={cn(
-        "group relative flex h-8 items-center gap-3 rounded-[8px] px-2.5 text-[13px] transition-colors [&_svg]:size-[17px] [&_svg]:shrink-0",
+        "group relative flex h-8 items-center gap-3 rounded-[8px] px-2.5 text-[13px] transition-colors duration-200 [&_svg]:size-[17px] [&_svg]:shrink-0 [&_svg]:transition-transform [&_svg]:duration-200 hover:[&_svg]:translate-x-[1px]",
         page === n.page ? "bg-surface-2 text-ink" : "text-ink-2 hover:bg-surface hover:text-ink",
       )}
     >
-      {page === n.page ? <span className="absolute left-0 top-2 h-4 w-[2px] rounded-full bg-accent" /> : null}
+      {page === n.page ? <motion.span layoutId="moth-nav-indicator" transition={{ type: "spring", stiffness: 520, damping: 38 }} className="absolute left-0 top-2 h-4 w-[2px] rounded-full bg-accent shadow-[0_0_8px_rgba(167,139,250,0.7)]" /> : null}
       <span className={cn("relative", page === n.page ? "text-accent-soft" : "")}>
         {n.icon}
         {collapsed && n.page === "inbox" && pending ? <span className="absolute -right-1 -top-1 size-2 rounded-full bg-accent" /> : null}
+        {n.page === "cortex" && cortexBusy ? <span className="absolute -right-1 -top-1 size-1.5 animate-pulse rounded-full bg-accent shadow-[0_0_6px_rgba(167,139,250,0.9)]" title="Cortex is working" /> : null}
       </span>
       <AnimatePresence initial={false}>
         {!collapsed ? (

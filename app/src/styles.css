@@ -162,3 +162,37 @@
   background: var(--color-ink);
   border: 3px solid var(--color-accent);
 }
+
+/* ---------------------------------------------------------------- v0.2.6 motion system */
+@keyframes moth-flap {
+  0%, 100% { transform: scaleX(1); }
+  50% { transform: scaleX(0.55); }
+}
+.moth-flap { animation: moth-flap 0.9s ease-in-out infinite; }
+@keyframes moth-shimmer {
+  0% { background-position: -80px 0; }
+  100% { background-position: 80px 0; }
+}
+.moth-shimmer {
+  background: linear-gradient(90deg, rgba(167, 139, 250, 0.1), rgba(196, 181, 253, 0.75), rgba(167, 139, 250, 0.1));
+  background-size: 80px 100%;
+  animation: moth-shimmer 1.4s linear infinite;
+}
+@keyframes moth-page-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.moth-page { animation: moth-page-in 0.26s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@keyframes moth-pop {
+  0% { transform: scale(0.6); opacity: 0; }
+  60% { transform: scale(1.08); opacity: 1; }
+  100% { transform: scale(1); }
+}
+.moth-pop { animation: moth-pop 0.42s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+button:not(:disabled) { transition-property: color, background-color, border-color, opacity, transform, box-shadow; transition-duration: 160ms; }
+button:not(:disabled):active { transform: translateY(0.5px) scale(0.985); }
+.panel { transition: border-color 200ms var(--ease-moth), background-color 200ms var(--ease-moth); }
+:root[data-motion="minimal"] .moth-flap,
+:root[data-motion="minimal"] .moth-shimmer,
+:root[data-motion="minimal"] .moth-page,
+:root[data-motion="minimal"] .moth-pop { animation: none; }

@@ -6,6 +6,7 @@ import { useApp } from "../lib/app";
 import { useLive } from "../lib/hooks";
 import { cn, timeAgo } from "../lib/utils";
 import { ReviewList } from "../components/ReviewList";
+import { CortexPulse } from "../components/CortexPulse";
 
 const gb = (b: number) => `${(b / 1024 ** 3).toFixed(b > 1024 ** 3 ? 1 : 2)} GB`;
 const mb = (b: number) => `${(b / 1024 ** 2).toFixed(0)} MB`;
@@ -88,6 +89,7 @@ export function CortexPage() {
       />
       <div className="grid gap-6 px-8 pb-10 xl:grid-cols-[1fr_380px]">
         <div className="min-w-0 space-y-6">
+          <CortexPulse st={st} />
           {/* status */}
           <section className="panel grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-4">
             <Stat label="Local AI">

@@ -48,7 +48,7 @@ export function Onboarding({ onDone }: { onDone: (memoryId?: string) => void }) 
           <div className="mb-6">
             <ol className="flex items-center gap-2" aria-label="First Flight progress">
               {STEPS.map((s, i) => (
-                <li key={s} className={cn("h-[3px] flex-1 rounded-full transition-colors duration-500", i < step ? "bg-accent" : i === step ? "bg-accent-soft" : "bg-line")} aria-current={i === step ? "step" : undefined} title={s} />
+                <li key={s} className={cn("h-[3px] flex-1 rounded-full transition-all duration-700", i < step ? "bg-accent" : i === step ? "bg-accent-soft shadow-[0_0_8px_rgba(167,139,250,0.6)]" : "bg-line")} aria-current={i === step ? "step" : undefined} title={s} />
               ))}
             </ol>
             <div className="mt-2 flex items-center justify-between text-[11.5px] text-ink-3">
@@ -531,7 +531,7 @@ function FirstMemoryStep({ onDone, onBack, skipped }: { onDone: (id?: string) =>
       ) : (
         <>
           <p className="text-[13.5px] leading-relaxed text-ink-2">
-            Saved. <span className="text-ink">"{saved.memory.title}"</span> is now in MOTH's database{saved.memory.project_id ? " and connected to its project" : ""}.
+            <Check className="moth-pop mr-1 inline size-4 text-ok" />Saved. <span className="text-ink">"{saved.memory.title}"</span> is now in MOTH's database{saved.memory.project_id ? " and connected to its project" : ""}.
           </p>
           <div className="relative mt-3 h-[230px] overflow-hidden rounded-[12px] border border-line">
             {graph ? <GraphCanvas ref={ref} nodes={graph.nodes} links={graph.links} settings={settings} selectedId={saved.memory.id} compact bloom={new Map([[saved.memory.id, performance.now() + 300]])} /> : null}
@@ -582,7 +582,7 @@ function Spec({ icon, label, value }: { icon: ReactNode; label: string; value: s
 
 function Notice({ icon, tone, children }: { icon: ReactNode; tone: "ok" | "warn"; children: ReactNode }) {
   return (
-    <div className={cn("mt-4 flex items-start gap-2 rounded-[12px] border px-4 py-3 text-[12.5px] leading-relaxed [&_svg]:mt-0.5 [&_svg]:size-4 [&_svg]:shrink-0", tone === "ok" ? "border-[color-mix(in_srgb,var(--color-ok)_35%,transparent)] text-ok" : "border-[color-mix(in_srgb,var(--color-warn)_35%,transparent)] text-warn")}>
+    <div className={cn("moth-pop mt-4 flex items-start gap-2 rounded-[12px] border px-4 py-3 text-[12.5px] leading-relaxed [&_svg]:mt-0.5 [&_svg]:size-4 [&_svg]:shrink-0", tone === "ok" ? "border-[color-mix(in_srgb,var(--color-ok)_35%,transparent)] text-ok" : "border-[color-mix(in_srgb,var(--color-warn)_35%,transparent)] text-warn")}>
       {icon}
       <span>{children}</span>
     </div>

@@ -9,6 +9,7 @@ import { Button, Dialog } from "./components/ui";
 import { onChanges, rpc } from "./lib/api";
 import { AppProvider, useApp, type Page } from "./lib/app";
 import { setMotionSetting } from "./lib/motion";
+import { hideSplash } from "./lib/splash";
 import { notify, onShellEvent, setCaptureShortcut, setKeepInTray, trayRefresh } from "./lib/tauri";
 import { AdaptationPage } from "./pages/Adaptation";
 import { ConnectionsPage } from "./pages/Connections";
@@ -56,6 +57,9 @@ function Root() {
         setState("error");
       });
   useEffect(() => void load(), []);
+  useEffect(() => {
+    if (state !== "loading") hideSplash();
+  }, [state]);
 
   return (
     <div className="flex h-full flex-col">
@@ -201,7 +205,9 @@ function Workspace({ firstMemory, onRestartFirstFlight }: { firstMemory?: string
     <div className="flex min-h-0 flex-1">
       <Sidebar />
       <main className="relative min-w-0 flex-1" id="main">
-        <Page key={page === "projects" ? `${page}-${app.params.id ?? ""}` : page} onRestartFirstFlight={onRestartFirstFlight} />
+        <div key={page === "projects" ? `${page}-${app.params.id ?? ""}` : page} className="moth-page h-full">
+          <Page onRestartFirstFlight={onRestartFirstFlight} />
+        </div>
       </main>
       <MemoryPanel />
       <CommandPalette />

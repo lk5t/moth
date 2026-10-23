@@ -76,7 +76,7 @@ export function QuickCapture({ embedded, onClose, onOpen }: { embedded?: boolean
       <div className={cn("flex flex-1 flex-col gap-2.5", embedded ? "" : "p-3.5")}>
         {saved ? (
           <div className="flex flex-1 flex-col items-center justify-center text-center">
-            <span className="grid size-9 place-items-center rounded-full bg-[color-mix(in_srgb,var(--color-ok)_16%,transparent)] text-ok">
+            <span className="moth-pop grid size-9 place-items-center rounded-full bg-[color-mix(in_srgb,var(--color-ok)_16%,transparent)] text-ok">
               <Check className="size-5" />
             </span>
             <p className="mt-2 text-[13.5px] text-ink">Saved to MOTH</p>
