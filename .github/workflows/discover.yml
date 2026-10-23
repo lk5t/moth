@@ -1,0 +1,34 @@
+name: Discover runtime and model facts
+
+# Prints exact, verifiable facts used to pin MOTH Cortex's manifest (no invented URLs or checksums).
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/discover.yml"]
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - name: llama.cpp latest release assets (name, size, sha256)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          for tag in $(gh api repos/ggml-org/llama.cpp/releases?per_page=3 -q '.[].tag_name'); do echo "TAG $tag"; done
+          gh api repos/ggml-org/llama.cpp/releases/latest -q '.tag_name as $t | .assets[] | select(.name | test("bin-(win-cpu-x64|win-vulkan-x64|ubuntu-x64|ubuntu-vulkan-x64|macos-arm64)")) | "\($t) \(.name) \(.size) \(.digest) \(.browser_download_url)"' | tee assets.txt
+          lines=$(awk 'BEGIN{ORS="%0A"}{print}' assets.txt)
+          echo "::warning title=llama.cpp assets::${lines}"
+      - name: Hugging Face GGUF files (path, size, sha256)
+        run: |
+          set -e
+          out=""
+          for repo in Qwen/Qwen2.5-0.5B-Instruct-GGUF Qwen/Qwen2.5-1.5B-Instruct-GGUF Qwen/Qwen2.5-3B-Instruct-GGUF Qwen/Qwen2.5-7B-Instruct-GGUF; do
+            json=$(curl -sSL "https://huggingface.co/api/models/$repo/tree/main")
+            lic=$(curl -sSL "https://huggingface.co/api/models/$repo" | jq -r '.cardData.license // .tags[]? | select(test("license")) // empty' | head -1)
+            rows=$(echo "$json" | jq -r --arg r "$repo" --arg l "$lic" '.[] | select(.path | test("q4_k_m.gguf$")) | "\($r) \(.path) \(.lfs.size // .size) \(.lfs.oid) license=\($l)"')
+            echo "$rows"
+            out="$out$rows%0A"
+          done
+          echo "::warning title=GGUF models::${out}"
