@@ -1,6 +1,6 @@
 [package]
 name = "moth"
-version = "0.2.5"
+version = "0.2.6"
 description = "MOTH: a self-evolving second brain for Claude"
 edition = "2021"
 publish = false

@@ -610,6 +610,8 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
   // ------------------------------------------------------------------ setup (once)
   useEffect(() => {
     const c = canvas.current!;
+    // Diagnostics hook (used by the performance tests): real counters from this renderer.
+    if (!live.current.compact) (window as any).__mothGraphStats = () => ({ nodes: nodesRef.current.length, links: linksRef.current.length, frames: counters.current.frames, lastFrameMs: counters.current.lastFrameMs, simAlpha: sim.current?.alpha() ?? 0 });
     const resize = () => {
       if (!wrap.current) return;
       const r = wrap.current.getBoundingClientRect();
@@ -850,7 +852,9 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     const projectCounts = new Map<string, number>();
     for (const n of nodesRef.current) if (n.project_id) projectCounts.set(n.project_id, (projectCounts.get(n.project_id) ?? 0) + 1);
     const projects = [...projectCounts.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
-    const spread = 110 + 9 * Math.sqrt(nodesRef.current.length);
+    const total0 = nodesRef.current.length;
+    const spread = 120 + 14 * Math.sqrt(total0);
+    const anchorK = 0.06 + 0.07 * Math.min(1, total0 / 600);
     const anchors = new Map<string, { x: number; y: number }>();
     projects.forEach((id, i) => {
       const r = spread * Math.sqrt(i + (projects.length > 1 ? 0.6 : 0));
@@ -870,13 +874,15 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
           const a = l.source as SimNode;
           const b = l.target as SimNode;
           // Cross-project links pull less, so clusters stay readable without hiding real connections.
-          const cross = cluster && a.project_id && b.project_id && a.project_id !== b.project_id ? 0.35 : 1;
+          const cross = cluster && a.project_id && b.project_id && a.project_id !== b.project_id ? 0.12 : 1;
           return (cross * st.linkForce * (0.6 + 0.4 * l.strength)) / Math.sqrt(Math.min(nb.get(a.id)?.size ?? 1, nb.get(b.id)?.size ?? 1));
         }),
     );
-    s.force("charge", forceManyBody<SimNode>().strength((d) => -st.repelForce * (d.category === "project" ? 1.8 : 1)).distanceMin(4).distanceMax(520).theta(0.9));
-    s.force("x", forceX<SimNode>((d) => anchorOf(d)?.x ?? 0).strength((d) => (anchorOf(d) ? 0.045 : st.centerForce * 0.5)));
-    s.force("y", forceY<SimNode>((d) => anchorOf(d)?.y ?? 0).strength((d) => (anchorOf(d) ? 0.045 : st.centerForce * 0.5)));
+    // Larger graphs need a little more room per node to avoid a dense core.
+    const repel = st.repelForce * (1 + 0.35 * Math.log10(Math.max(1, total0 / 100)));
+    s.force("charge", forceManyBody<SimNode>().strength((d) => -repel * (d.category === "project" ? 1.8 : 1)).distanceMin(4).distanceMax(600).theta(0.9));
+    s.force("x", forceX<SimNode>((d) => anchorOf(d)?.x ?? 0).strength((d) => (anchorOf(d) ? anchorK : st.centerForce * 0.5)));
+    s.force("y", forceY<SimNode>((d) => anchorOf(d)?.y ?? 0).strength((d) => (anchorOf(d) ? anchorK : st.centerForce * 0.5)));
     s.force("collide", forceCollide<SimNode>((d) => d.r + 3.5).iterations(2).strength(0.8));
 
     const total = nodesRef.current.length;

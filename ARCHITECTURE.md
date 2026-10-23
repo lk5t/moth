@@ -168,3 +168,13 @@ MOTH cannot observe Claude conversations. It learns from (a) MCP tool calls Clau
 
 ### Desktop shell
 Tray menu: Open MOTH, Open The Mind, Open Cortex, Quick Capture, Pause/Resume Learning, Privacy Mode, Settings, Restart memory engine, Quit MOTH Completely. Close hides to the tray when enabled; double-click restores. Global Quick Capture shortcut (default Ctrl+Alt+M, configurable) opens a small always-on-top window. "Start with Windows" starts minimised without loading the model. Quit asks the engine to stop cleanly and only force-stops it after 15 s.
+
+## v0.2.6 — Awakening (visual update)
+
+- **The Mind renderer** (`app/src/graph/GraphCanvas.tsx`, Canvas 2D + d3-force/d3-zoom): soft-white nodes; glow drawn from two cached radial-gradient sprites (white, lavender) with additive blending — no shadowBlur or full-screen blur. Every visual state (hover, selection, neighbours, dimming, size boost, labels) is an eased per-node/per-edge value. Ordinary edges are drawn in one batched path; only highlighted/new edges are drawn individually. Hit testing uses a d3 quadtree rebuilt only when positions change. A canvas tooltip shows the hovered memory's title.
+- **Physics:** link/charge/collision forces plus a pull toward a per-project anchor (golden-angle layout derived from real project membership); cross-project links pull less; more damping (`velocityDecay 0.52`); repulsion scales gently with graph size; dragged nodes are released to settle naturally (saved pins still honoured); positions persist; new nodes enter next to a connected neighbour or their project.
+- **Living graph:** the change feed drives `markNew` (fade + scale in + local light), `markNewLinks` (edge reveal + a pulse travelling along it), `pulse` (updated memory) and a "N memories learned" notice. All triggered by real database rows.
+- **Idle cost:** no redraws when nothing changes (measured 0 redraws in 3 s idle), nothing while the page is hidden; the optional shimmer runs at 12 fps only in the "Full" motion level.
+- **Motion level** (`appearance.motion`: Automatic/Full/Balanced/Minimal; Automatic follows Windows' reduce-animations setting).
+- **Startup:** inline SVG/CSS splash in `index.html` (light → moth unfolds → motes → fade), dismissed by `lib/splash.ts` as soon as the app is ready (never delays it), with a calm "waking up" state if the engine is slow; skipped for the Quick Capture window.
+- **Cortex activity** (`components/CortexPulse.tsx`): wing-beat indicator only while the runtime/queue/install is really busy; real install progress; done/error states.
