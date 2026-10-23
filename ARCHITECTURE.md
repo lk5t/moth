@@ -99,3 +99,48 @@ from the newest healthy backup automatically.
 * The built-in embeddings are lexical (shared words and word forms). For meaning-level matching, point
   MOTH at an embedding model (Ollama/llama.cpp/OpenAI-compatible or Voyage).
 * Google sign-in and Drive/Gmail/Calendar import need your own Google OAuth client ID.
+
+## Cortex (v0.2): MOTH's own local intelligence
+
+```
+ Claude ──moth_learn / moth_analyze_information / moth_get_intelligent_context──▶ MCP process
+                                         │ (enqueues a job; never runs a model)
+                                         ▼
+ moth-core "serve" (desktop app engine) ── job worker ──▶ Cortex
+   Cortex: Understand → Recall → Compare → Propose ──▶ IntelligenceRouter
+                                                      ├─ LocalModelProvider ──HTTP 127.0.0.1──▶ llama-server (llama.cpp, GGUF)
+                                                      └─ CloudModelProvider (Anthropic; only if configured + consented + allowed)
+           Validate (deterministic code) ──▶ apply (versioned, reversible)  or  review_queue (user decides)
+```
+
+* **Runtime**: llama.cpp `llama-server`, pinned build `b11829` (CPU or Vulkan), downloaded by MOTH on first
+  use from the official GitHub release and verified by SHA-256 (`core/src/cortex/manifest.ts`; values read
+  by the `Discover runtime and model facts` workflow, not typed by hand).
+* **Models**: Qwen2.5 Instruct GGUF Q4_K_M — 0.5B / 1.5B (Apache-2.0) / 3B (Qwen research licence),
+  from Qwen's official Hugging Face repos, SHA-256 verified, resumable downloads. Recommended by RAM.
+* **On demand**: nothing is loaded at start-up. The first AI task starts `llama-server` on a free
+  127.0.0.1 port; it unloads after `cortex.idleTimeoutMin` (default 5) idle minutes. Requests are
+  serialised, cancellable, and a crashed runtime is restarted on the next request (gives up after 3
+  consecutive crashes). A runtime orphaned by a crashed engine is found via its pid/port record and stopped.
+* **Why not in Rust**: the memory engine (database, validation, versioning) lives in the TypeScript
+  sidecar; Cortex sits next to it so every model proposal passes the same deterministic checks as every
+  other write. Inference runs in a separate process (llama-server) and never touches the database:
+  the model only returns JSON constrained by a schema; it cannot run SQL or commands.
+* **Balanced autonomy** (`core/src/cortex/validator.ts`): new sourced memories, non-conflicting additions,
+  well-supported links and "already known" confirmations are applied; replacing facts, contradictions,
+  likely duplicates, low confidence, inconsistent reasoning and anything touching text you wrote go to the
+  **review queue**. Nothing is ever deleted automatically. Every applied change keeps the previous version
+  and an undo recipe.
+* **Learning without retraining**: approvals, rejections and undos are stored in `feedback` and shown to
+  the model as examples for similar future decisions; `retrieval_feedback` (from `moth_end_task` or the UI)
+  nudges search ranking by at most ±0.04. Model weights never change (no fine-tuning in this version).
+* **Cloud**: Anthropic is implemented as the fallback provider but is off until you enable cloud fallback,
+  add a key and accept the data disclosure; projects can be marked local-only.
+
+### Tests
+
+* `core/test/cortex.mock.test.ts` — **mocked** (fake llama-server): lifecycle, idle unload, crash recovery,
+  cancellation, retries, validator, review/feedback, downloads + extraction, MCP queueing. Proves plumbing only.
+* `core/test-real/cortex.real.test.ts` — **real** llama.cpp + Qwen2.5 1.5B, installed through MOTH's own
+  installer, running the inventory 6 → 10 slots acceptance scenario. Runs in CI on Linux and Windows
+  (`Real local AI` jobs); evidence is published as a job annotation.

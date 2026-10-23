@@ -424,7 +424,7 @@ export class Cortex {
     const target = d.target;
     const createFromStatement = () =>
       this.brain.createMemoryWithLinks(
-        { title: p.title?.trim() || undefined, content: p.content?.trim() || s.text, category: KIND_TO_CATEGORY[s.kind] ?? "fact", project_id: projectId ?? target?.project_id ?? null, source: input.source || "cortex", source_ref: input.source_ref ?? null, tags: ["cortex"] },
+        { title: p.title?.trim() || undefined, content: (p.content ?? "").trim() || s.text, category: KIND_TO_CATEGORY[s.kind] ?? "fact", project_id: projectId ?? target?.project_id ?? null, source: input.source || "cortex", source_ref: input.source_ref ?? null, tags: ["cortex"] },
         ctx,
       );
     switch (d.operation) {
@@ -439,10 +439,10 @@ export class Cortex {
         return m.id;
       }
       case "append":
-        return st.appendMemory(target!.id, p.content.trim() || s.text, ctx).id;
+        return st.appendMemory(target!.id, (p.content ?? "").trim() || s.text, ctx).id;
       case "update":
       case "flag_contradiction": {
-        const m = st.updateMemory(target!.id, { content: p.content.trim() || s.text, ...(p.title?.trim() ? { title: p.title.trim() } : {}) }, ctx, { changeType: "updated", force: approved });
+        const m = st.updateMemory(target!.id, { content: (p.content ?? "").trim() || s.text, ...(p.title?.trim() ? { title: p.title.trim() } : {}) }, ctx, { changeType: "updated", force: approved });
         this.clearFlag(m.id, "possible_conflict");
         return m.id;
       }
@@ -485,14 +485,20 @@ export class Cortex {
     const r = this.brain.db.get<Row>("SELECT * FROM review_queue WHERE id = ? AND user_id = ?", [id, this.brain.store.userId]);
     if (!r) throw new MothError("not_found", `No review item ${id}`);
     if (r.status !== "pending") throw new MothError("invalid_input", `This item was already ${r.status}`);
-    const p = { ...(safeJson<Comparison & { project_id?: string | null; target_version?: number | null }>(r.proposal as string, {} as any)), ...edits };
+    const cleanEdits = Object.fromEntries(Object.entries(edits).filter(([, v]) => typeof v === "string" && v.trim()));
+    const p = { ...(safeJson<Comparison & { project_id?: string | null; target_version?: number | null }>(r.proposal as string, {} as any)), ...cleanEdits };
     const target = r.target_memory_id ? this.brain.store.getMemory(r.target_memory_id as string) : null;
     if (r.target_memory_id && (!target || target.status !== "active")) {
       this.brain.db.run("UPDATE review_queue SET status = 'failed', decided_at = ?, decided_by = 'user', result = ? WHERE id = ?", [nowIso(), JSON.stringify({ error: "The memory it refers to was deleted or archived" }), id]);
       throw new MothError("stale", "The memory this proposal refers to no longer exists or is archived.");
     }
     const changedSince = !!(target && p.target_version && target.version !== p.target_version);
-    const decision: Decision = { action: "apply", operation: (r.operation as Decision["operation"]), target, risk: r.risk as Decision["risk"], checks: [], reason: r.reason as string };
+    // A generic "review" about an existing memory: approving with edited text updates it, otherwise the statement is added to it.
+    let operation = r.operation as Decision["operation"];
+    if (operation === "review" && target) operation = cleanEdits.content ? "update" : "append";
+    if (operation === "append" && target && !cleanEdits.content && !(p as Comparison).content) (p as Comparison).content = r.statement as string;
+    if (operation === "append" && target && r.operation === "review") (p as Comparison).content = r.statement as string;
+    const decision: Decision = { action: "apply", operation, target, risk: r.risk as Decision["risk"], checks: [], reason: r.reason as string };
     const memoryId = this.brain.db.tx(() => {
       const mid = this.applyOperation(decision, p as Comparison, { text: r.statement as string, kind: (p as any).kind ?? "fact" }, p.project_id ?? null, { text: r.statement as string, source: (r.source as string) ?? "cortex", source_ref: r.source_ref as string, task_id: r.task_id as string }, (r.model as string) ?? "local model", true);
       this.brain.db.run("UPDATE review_queue SET status = 'applied', decided_at = ?, decided_by = 'user', result = ? WHERE id = ?", [nowIso(), JSON.stringify({ memory_id: mid, target_changed_since_proposal: changedSince }), id]);

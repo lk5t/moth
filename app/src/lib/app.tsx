@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 
-export type Page = "overview" | "mind" | "memories" | "projects" | "metamorphosis" | "timeline" | "activity" | "connections" | "settings";
+export type Page = "overview" | "mind" | "memories" | "projects" | "metamorphosis" | "cortex" | "timeline" | "activity" | "connections" | "settings";
 
 export interface Toast {
   id: number;

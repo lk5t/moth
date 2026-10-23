@@ -7,7 +7,7 @@ import { isTauri, rpc } from "../lib/api";
 import { saveSecret } from "../lib/tauri";
 import { cn } from "../lib/utils";
 
-const STEPS = ["Welcome", "Your brain", "How it learns", "AI processing", "Connect Claude", "Test"] as const;
+const STEPS = ["Welcome", "Your brain", "How it learns", "AI processing", "Local AI", "Connect Claude", "Test"] as const;
 
 export function Onboarding({ onDone }: { onDone: () => void }) {
   const [step, setStep] = useState(0);
@@ -116,7 +116,9 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
               </Card>
             ) : null}
 
-            {step === 4 ? (
+            {step === 4 ? <LocalAiStep onNext={next} /> : null}
+
+            {step === 5 ? (
               <Card title="Connect Claude" footer={<Button variant="primary" onClick={next}>{connected.desktop || connected.code ? "Continue" : "Skip for now"}</Button>}>
                 <p className="mb-4 text-[13.5px] leading-relaxed text-ink-2">Pick the Claude apps you use. MOTH adds itself to their settings (a backup of the old file is kept).</p>
                 <div className="grid gap-3">
@@ -149,7 +151,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
               </Card>
             ) : null}
 
-            {step === 5 ? (
+            {step === 6 ? (
               <Card
                 title="Test the connection"
                 footer={
@@ -158,7 +160,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                   </Button>
                 }
               >
-                <p className="text-[13.5px] leading-relaxed text-ink-2">This starts MOTH's MCP server exactly the way Claude will and checks that all 15 memory tools answer.</p>
+                <p className="text-[13.5px] leading-relaxed text-ink-2">This starts MOTH's MCP server exactly the way Claude will and checks that all of its memory tools answer.</p>
                 <div className="mt-4 flex items-center gap-3">
                   <Button
                     loading={testing}
@@ -182,6 +184,61 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         </AnimatePresence>
       </div>
     </div>
+  );
+}
+
+function LocalAiStep({ onNext }: { onNext: () => void }) {
+  const [plan, setPlan] = useState<any>(null);
+  const [consent, setConsent] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => void rpc("cortex.plan").then(setPlan).catch((e) => setErr(e.message)), []);
+  const gb = (b: number) => `${(b / 1024 ** 3).toFixed(1)} GB`;
+  return (
+    <Card
+      title="MOTH's own AI (optional)"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onNext}>
+            Later
+          </Button>
+          <Button
+            variant="primary"
+            disabled={!consent || !plan || plan.enoughDisk === false || !plan.runtimeSupported}
+            onClick={async () => {
+              try {
+                await rpc("cortex.install", { modelId: plan.model.id, consent: true });
+                onNext();
+              } catch (e) {
+                setErr((e as Error).message);
+              }
+            }}
+          >
+            Download and continue
+          </Button>
+        </>
+      }
+    >
+      <p className="text-[13.5px] leading-relaxed text-ink-2">
+        A small language model can run on this computer so MOTH understands what Claude reports and keeps its knowledge tidy by itself, offline. It only loads when there is work and unloads after a few idle minutes.
+      </p>
+      {plan ? (
+        <div className="mt-4 rounded-[12px] border border-line px-4 py-3 text-[12.5px] leading-relaxed text-ink-2">
+          <div className="text-[13.5px] text-ink">{plan.model.name}</div>
+          <div>{plan.recommended.reason}</div>
+          <div>
+            Download {gb(plan.downloadBytes)} (model from huggingface.co, llama.cpp runtime from github.com). Licence: {plan.model.license}.
+          </div>
+          {plan.hardware.freeDiskGb != null ? <div>Free disk space: {plan.hardware.freeDiskGb} GB.</div> : null}
+        </div>
+      ) : (
+        <div className="skeleton mt-4 h-20" />
+      )}
+      <label className="mt-4 flex items-start gap-2 text-[12.5px] leading-snug text-ink-2">
+        <input type="checkbox" className="mt-0.5 accent-[#A78BFA]" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
+        Download it now. It installs in the background; you can keep going.
+      </label>
+      {err ? <p className="mt-2 text-[12.5px] text-danger">{err}</p> : null}
+    </Card>
   );
 }
 

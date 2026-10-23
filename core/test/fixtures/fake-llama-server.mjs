@@ -36,15 +36,16 @@ http
         return reply(res, completion(JSON.stringify({ statements })));
       }
       if (sys.includes("compare ONE new statement")) {
+        const ev = (o) => JSON.stringify({ same_subject: o.target, existing_value: o.ev ?? "", new_value: o.nv ?? "", values_differ: !!o.differ, signals_change: !!o.change, ...o.rest });
         const statement = (user.match(/New statement: "([\s\S]*)"$/) ?? [, ""])[1];
         const mem = user.match(/\[1\] ([^:]+): ([^\n]*?) \(updated/);
         const shares = mem && /inventory/i.test(mem[2]) && /inventory/i.test(statement);
         if (shares && /upgraded|now/i.test(statement)) {
           const n = (statement.match(/(\w+) slots/) ?? [, "?"])[1];
-          return reply(res, completion(JSON.stringify({ relation: "correction", target: 1, operation: "update", title: mem[1], content: mem[2].replace(/\w+ slots/, `${n} slots`), link_type: "none", reason: "The slot count changed.", confidence: 0.9 })));
+          return reply(res, completion(ev({ target: 1, ev: "six slots", nv: `${n} slots`, differ: true, change: true, rest: { relation: "correction", target: 1, operation: "update", title: mem[1], content: mem[2].replace(/\w+ slots/, `${n} slots`), link_type: "none", reason: "The slot count changed.", confidence: 0.9 } })));
         }
-        if (shares && mem[2].includes(statement.replace(/\.$/, ""))) return reply(res, completion(JSON.stringify({ relation: "already_known", target: 1, operation: "none", title: mem[1], content: "", link_type: "none", reason: "Same fact.", confidence: 0.9 })));
-        return reply(res, completion(JSON.stringify({ relation: "new", target: 0, operation: "create", title: statement.slice(0, 40), content: statement, link_type: "none", reason: "Nothing similar stored.", confidence: 0.8 })));
+        if (shares && mem[2].includes(statement.replace(/\.$/, ""))) return reply(res, completion(ev({ target: 1, rest: { relation: "already_known", target: 1, operation: "none", title: mem[1], content: "", link_type: "none", reason: "Same fact.", confidence: 0.9 } })));
+        return reply(res, completion(ev({ target: 0, rest: { relation: "new", target: 0, operation: "create", title: statement.slice(0, 40), content: statement, link_type: "none", reason: "Nothing similar stored.", confidence: 0.8 } })));
       }
       if (sys.includes("prepare a short briefing")) return reply(res, completion(JSON.stringify({ brief: "MOCK brief.", relevant: [1] })));
       reply(res, completion("{}"));

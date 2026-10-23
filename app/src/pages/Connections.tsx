@@ -152,7 +152,7 @@ export function ConnectionsPage() {
           ) : null}
         </Card>
 
-        <Card title={`Tools Claude can use (${s?.tools.length ?? 15})`}>
+        <Card title={`Tools Claude can use (${s?.tools.length ?? ""})`}>
           <ul className="grid grid-cols-1 gap-x-4 gap-y-1 text-[12.5px] text-ink-2 sm:grid-cols-2">
             {(s?.tools ?? []).map((t: string) => (
               <li key={t} className="truncate">

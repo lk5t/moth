@@ -9,6 +9,7 @@ import { onChanges, rpc } from "./lib/api";
 import { AppProvider, useApp } from "./lib/app";
 import { notify, setKeepInTray } from "./lib/tauri";
 import { ConnectionsPage } from "./pages/Connections";
+import { CortexPage } from "./pages/Cortex";
 import { ActivityPage, TimelinePage } from "./pages/History";
 import { MemoriesPage } from "./pages/Memories";
 import { MetamorphosisPage } from "./pages/Metamorphosis";
@@ -83,6 +84,7 @@ function Workspace() {
       if (mod && e.key.toLowerCase() === "k") (e.preventDefault(), setPaletteOpen(true));
       else if (mod && e.key.toLowerCase() === "n") (e.preventDefault(), edit("new"));
       else if (mod && /^[1-9]$/.test(e.key)) (e.preventDefault(), go(NAV[Number(e.key) - 1].page));
+      else if (mod && e.key === ",") (e.preventDefault(), go("settings"));
       else if (mod && e.key === "\\") (e.preventDefault(), app.setSidebarCollapsed(!app.sidebarCollapsed));
       else if (e.key === "Escape" && !typing && selected && !document.querySelector("[role=dialog]")) select(null);
       else if (e.key === "/" && !typing) (e.preventDefault(), setPaletteOpen(true));
@@ -105,7 +107,7 @@ function Workspace() {
     [],
   );
 
-  const Page = { overview: OverviewPage, mind: MindPage, memories: MemoriesPage, projects: ProjectsPage, metamorphosis: MetamorphosisPage, timeline: TimelinePage, activity: ActivityPage, connections: ConnectionsPage, settings: SettingsPage }[page];
+  const Page = { overview: OverviewPage, mind: MindPage, memories: MemoriesPage, projects: ProjectsPage, metamorphosis: MetamorphosisPage, cortex: CortexPage, timeline: TimelinePage, activity: ActivityPage, connections: ConnectionsPage, settings: SettingsPage }[page];
   return (
     <div className="flex min-h-0 flex-1">
       <Sidebar />

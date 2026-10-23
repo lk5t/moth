@@ -99,7 +99,7 @@ test("validator: balanced autonomy rules", () => {
   const mem = (o: Partial<any> = {}) => ({ id: "mem_1", title: "Inventory", content: "6 slots", status: "active", version: 1, manual_lock: false, importance: 0.5, flags: [], ...o }) as any;
   const base = { statement: "s", autonomy: "balanced" as const, minConfidence: 0.35, duplicateThreshold: 0.88, maxSimilarityToAny: 0.2, sourcePresent: true };
   const c = [{ index: 1, memory: mem(), similarity: 0.7 }];
-  const p = (o: any) => ({ relation: "new", target: 0, operation: "create", title: "t", content: "c", link_type: "none", reason: "r", confidence: 0.8, ...o });
+  const p = (o: any) => ({ same_subject: 0, existing_value: "", new_value: "", values_differ: false, signals_change: false, relation: "new", target: 0, operation: "create", title: "t", content: "c", link_type: "none", reason: "r", confidence: 0.8, ...o });
   assert.equal(validateProposal({ ...base, candidates: c, proposal: p({}) }).action, "apply");
   assert.equal(validateProposal({ ...base, candidates: c, proposal: p({ relation: "correction", operation: "update", target: 1 }) }).action, "review");
   assert.equal(validateProposal({ ...base, autonomy: "autonomous", candidates: c, proposal: p({ relation: "correction", operation: "update", target: 1, confidence: 0.95 }) }).action, "apply");
@@ -111,6 +111,12 @@ test("validator: balanced autonomy rules", () => {
   assert.equal(validateProposal({ ...base, candidates: c, proposal: p({ relation: "extends", operation: "append", target: 1 }) }).action, "apply");
   assert.equal(validateProposal({ ...base, candidates: c, proposal: p({ relation: "contradiction", operation: "flag_contradiction", target: 1 }) }).action, "review");
   assert.equal(validateProposal({ ...base, sourcePresent: false, candidates: c, proposal: p({}) }).action, "review");
+  // Safety net: an "append" whose values conflict with the target is never applied silently.
+  const conflict = validateProposal({ ...base, statement: "The inventory now has 10 slots.", candidates: c, proposal: p({ relation: "extends", operation: "append", target: 1, content: "now 10 slots" }) });
+  assert.equal(conflict.action, "review");
+  assert.ok(conflict.checks.some((x) => x.startsWith("conflicting evidence")));
+  const evidence = validateProposal({ ...base, statement: "Upgraded to ten.", candidates: c, proposal: p({ relation: "extends", operation: "append", target: 1, values_differ: true, signals_change: true, existing_value: "six", new_value: "ten" }) });
+  assert.equal(evidence.action, "review");
 });
 
 test("pipeline (mock model): correction goes to review, approval updates with history, survives restart; feedback recorded", async () => {

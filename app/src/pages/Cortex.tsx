@@ -9,13 +9,13 @@ import { cn, timeAgo } from "../lib/utils";
 const gb = (b: number) => `${(b / 1024 ** 3).toFixed(b > 1024 ** 3 ? 1 : 2)} GB`;
 const mb = (b: number) => `${(b / 1024 ** 2).toFixed(0)} MB`;
 
-const STATE_LABEL: Record<string, { text: string; tone: "ok" | "accent" | "neutral" | "warn" | "danger" }> = {
-  unloaded: { text: "Asleep (model not in memory)", tone: "neutral" },
-  starting: { text: "Loading the model…", tone: "accent" },
-  ready: { text: "Awake and ready", tone: "ok" },
-  busy: { text: "Thinking", tone: "accent" },
-  stopping: { text: "Unloading…", tone: "neutral" },
-  error: { text: "Stopped with an error", tone: "danger" },
+const STATE_LABEL: Record<string, { text: string; hint: string; tone: "ok" | "accent" | "neutral" | "warn" | "danger" }> = {
+  unloaded: { text: "Asleep", hint: "Model not in memory; loads when work arrives", tone: "neutral" },
+  starting: { text: "Loading", hint: "Reading the model into memory", tone: "accent" },
+  ready: { text: "Ready", hint: "Model loaded", tone: "ok" },
+  busy: { text: "Thinking", hint: "Working on a request", tone: "accent" },
+  stopping: { text: "Unloading", hint: "Freeing memory", tone: "neutral" },
+  error: { text: "Error", hint: "See Problems below", tone: "danger" },
 };
 
 const OP_LABEL: Record<string, string> = {
@@ -91,8 +91,9 @@ export function CortexPage() {
           <section className="panel grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-4">
             <Stat label="Local AI">
               <Badge tone={st.paused ? "warn" : state.tone}>{st.paused ? "Paused" : state.text}</Badge>
+              <span className="mt-1 block text-[11.5px] text-ink-3">{st.paused ? "Nothing is analysed until you resume" : state.hint}</span>
             </Stat>
-            <Stat label="Model">{st.selected_model.entry ? `${st.selected_model.entry.name} (${st.selected_model.entry.quantization})` : st.selected_model.installed ? st.selected_model.id : "None installed"}</Stat>
+            <Stat label="Model">{!st.selected_model.installed ? "None installed" : st.selected_model.entry ? `${st.selected_model.entry.name} (${st.selected_model.entry.quantization})` : st.selected_model.id}</Stat>
             <Stat label="Current task">{st.current_task ? `${labelTask(st.current_task.label)}, ${timeAgo(new Date(st.current_task.startedAt).toISOString())}` : "Nothing"}</Stat>
             <Stat label="Waiting">
               {st.queue.pending_jobs} to analyse, {st.queue.pending_reviews} for you to review
@@ -332,15 +333,22 @@ function ReviewQueue({ reviews, onDone }: { reviews: any[]; onDone: () => void }
                   ) : null}
                 </div>
               ) : null}
+              {r.proposal.values_differ && r.proposal.existing_value ? (
+                <p className="mt-2 text-[12.5px] text-ink-2">
+                  The model compared <span className="text-ink">"{r.proposal.existing_value}"</span> with <span className="text-ink">"{r.proposal.new_value}"</span>
+                  {r.proposal.signals_change ? " and read it as a change." : " but nothing says which is current."}
+                </p>
+              ) : null}
               <p className="mt-2 text-[12px] text-ink-3">
                 Why it waits: {r.reason} Model's reason: {r.proposal.reason}
               </p>
+              {r.operation === "review" && r.target ? <p className="text-[12px] text-ink-3">Approve adds the statement to the memory; "Edit and approve" lets you rewrite the memory instead.</p> : null}
               <div className="mt-3 flex flex-wrap gap-2">
                 <Button size="sm" variant="primary" onClick={() => run(() => rpc("cortex.approve", { id: r.id }), "Approved. The old version stays in history.")}>
                   <Check /> Approve
                 </Button>
                 {["update", "flag_contradiction", "append", "create", "review"].includes(r.operation) ? (
-                  <Button size="sm" onClick={() => (setEditing(r), setText(r.proposal.content || r.statement))}>
+                  <Button size="sm" onClick={() => (setEditing(r), setText(r.operation === "review" && r.target ? r.target.content : r.proposal.content || r.statement))}>
                     <Pencil /> Edit and approve
                   </Button>
                 ) : null}
@@ -525,16 +533,19 @@ function Controls({ st, onChange }: { st: any; onChange: () => void }) {
   return (
     <section className="panel space-y-4 p-4">
       <h2 className="text-[14px]">Behaviour</h2>
-      <Field label="How much MOTH may change on its own">
-        <Select value={st.settings.autonomy} onChange={(e) => set("cortex.autonomy", e.target.value)}>
-          <option value="cautious">Cautious: only connections; everything else waits for you</option>
-          <option value="balanced">Balanced: adds and extends knowledge; replacements wait for you</option>
-          <option value="autonomous">Autonomous: also applies very confident corrections</option>
+      <Field
+        label="How much MOTH may change on its own"
+        hint={st.settings.autonomy === "cautious" ? "Only connections and confirmations happen alone; everything else waits for you." : st.settings.autonomy === "autonomous" ? "Also applies very confident corrections. Things you wrote yourself still wait for you." : "Adds and extends knowledge alone. Replacing facts, contradictions and doubtful cases wait for you."}
+      >
+        <Select className="w-full" value={st.settings.autonomy} onChange={(e) => set("cortex.autonomy", e.target.value)}>
+          <option value="cautious">Cautious</option>
+          <option value="balanced">Balanced (recommended)</option>
+          <option value="autonomous">Autonomous</option>
         </Select>
       </Field>
       <Slider label="Unload the model after being idle" min={1} max={60} step={1} value={st.settings.idleTimeoutMin} onChange={(v) => set("cortex.idleTimeoutMin", v)} format={(v) => `${v} min`} />
       <Field label="Hardware" hint={hw ? (hw.gpus.length ? `Detected: ${hw.gpus.map((g: any) => g.name + (g.vramGb ? ` (${g.vramGb} GB)` : "")).join(", ")}.` : hw.gpuDetection === "ok" ? "No graphics card detected." : "Graphics card detection unavailable.") : undefined}>
-        <Select value={st.runtime.variant} onChange={(e) => set("cortex.runtimeVariant", e.target.value)}>
+        <Select className="w-full" value={st.runtime.variant} onChange={(e) => set("cortex.runtimeVariant", e.target.value)}>
           <option value="cpu">Processor (works everywhere)</option>
           <option value="vulkan">Graphics card via Vulkan (faster; downloads another runtime)</option>
         </Select>

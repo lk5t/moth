@@ -9,6 +9,8 @@ code=${PIPESTATUS[0]}
 if [ "$code" -ne 0 ]; then
   msg=$(grep -vE '^\s*$' "$log" | tail -n 70 | sed -e 's/%/%25/g' -e 's/\r//g' | awk 'BEGIN{ORS="%0A"}{print}')
   echo "::error title=${title}::${msg}"
+ fail=$(grep -A40 -E '^not ok' "$log" | head -n 120 | sed -e 's/%/%25/g' -e 's/\r//g' | awk 'BEGIN{ORS="%0A"}{print}')
+  [ -n "$fail" ] && echo "::error title=${title} (failing tests)::${fail}"
   grep -E 'error(\[E[0-9]+\])?:|error TS|Error:' "$log" | head -n 9 | while IFS= read -r line; do echo "::error title=${title} (match)::${line//%/%25}"; done
 fi
 exit "$code"

@@ -1,4 +1,4 @@
-import { Activity, Brain, Cable, Clock3, Copy, FolderKanban, LayoutDashboard, Library, Minus, PanelLeftClose, PanelLeftOpen, Search, Settings, Sparkles, Square, X } from "lucide-react";
+import { Activity, Brain, Cable, Clock3, Copy, Cpu, FolderKanban, LayoutDashboard, Library, Minus, PanelLeftClose, PanelLeftOpen, Search, Settings, Sparkles, Square, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState, type ReactNode } from "react";
 import { isTauri, onConnection } from "../lib/api";
@@ -15,10 +15,11 @@ export const NAV: { page: Page; label: string; icon: ReactNode; key: string }[] 
   { page: "memories", label: "Memories", icon: <Library />, key: "3" },
   { page: "projects", label: "Projects", icon: <FolderKanban />, key: "4" },
   { page: "metamorphosis", label: "Metamorphosis", icon: <Sparkles />, key: "5" },
-  { page: "timeline", label: "Timeline", icon: <Clock3 />, key: "6" },
-  { page: "activity", label: "Activity", icon: <Activity />, key: "7" },
-  { page: "connections", label: "Connections", icon: <Cable />, key: "8" },
-  { page: "settings", label: "Settings", icon: <Settings />, key: "9" },
+  { page: "cortex", label: "Cortex", icon: <Cpu />, key: "6" },
+  { page: "timeline", label: "Timeline", icon: <Clock3 />, key: "7" },
+  { page: "activity", label: "Activity", icon: <Activity />, key: "8" },
+  { page: "connections", label: "Connections", icon: <Cable />, key: "9" },
+  { page: "settings", label: "Settings", icon: <Settings />, key: "," },
 ];
 
 export function TitleBar() {
@@ -84,6 +85,7 @@ export function Sidebar() {
   const { page, go, sidebarCollapsed: collapsed, setSidebarCollapsed } = useApp();
   const { data: stats } = useLive<any>("meta.stats", {}, { entities: ["memory", "relationship", "project"] });
   const { data: conn } = useLive<any>("connections.status", {}, { entities: ["activity"] });
+  const { data: reviews } = useLive<any[]>("cortex.reviews", {}, { entities: ["review"] });
   return (
     <motion.nav
       animate={{ width: collapsed ? 56 : 216 }}
@@ -107,8 +109,9 @@ export function Sidebar() {
             <span className={page === n.page ? "text-accent-soft" : ""}>{n.icon}</span>
             <AnimatePresence initial={false}>
               {!collapsed ? (
-                <motion.span initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex-1 truncate text-left">
+                <motion.span initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex flex-1 items-center truncate text-left">
                   {n.label}
+                  {n.page === "cortex" && reviews?.length ? <span className="ml-auto rounded-full bg-[color-mix(in_srgb,var(--color-accent)_22%,transparent)] px-1.5 text-[11px] text-accent-soft" title="Waiting for your approval">{reviews.length}</span> : null}
                 </motion.span>
               ) : null}
             </AnimatePresence>

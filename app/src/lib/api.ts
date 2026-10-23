@@ -80,7 +80,7 @@ export async function rpc<T = any>(method: string, params: unknown = {}): Promis
 }
 
 export interface ChangeEvent {
-  entity: "memory" | "relationship" | "project" | "learning" | "activity";
+  entity: "memory" | "relationship" | "project" | "learning" | "activity" | "review" | "cortex";
   id: string;
   op: "insert" | "update" | "delete";
 }

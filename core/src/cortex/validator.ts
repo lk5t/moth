@@ -74,6 +74,19 @@ export function validateProposal(v: ValidationInput): Decision {
     return { action: "review", operation: op, target, risk: "medium", checks, reason: "Knowledge without a source needs your confirmation." };
   }
 
+  // Conflicting evidence: never silently add information whose values disagree with the target.
+  if (target && ["append", "none", "mark_duplicate"].includes(op)) {
+    const why = conflictingValues(v.statement, target.content, p);
+    if (why) {
+      checks.push(`conflicting evidence: ${why}`);
+      return { action: "review", operation: p.signals_change ? "review" : "flag_contradiction", target, risk: "medium", checks, reason: `The new information seems to change an existing value (${why}), so a person should decide.` };
+    }
+  }
+  if (p.values_differ && p.signals_change && p.relation !== "correction") {
+    checks.push(`model found a changed value but chose "${p.relation}"`);
+    return { action: "review", operation: op === "update" ? "update" : "review", target, risk: "medium", checks, reason: "The model's evidence and its decision disagree." };
+  }
+
   // Consistency between the model's own relation and operation.
   const expected = EXPECTED_OP[p.relation] ?? [];
   if (!expected.includes(op)) {
@@ -120,4 +133,24 @@ export function validateProposal(v: ValidationInput): Decision {
     default:
       return { action: "review", operation: "review", target, risk: "medium", checks, reason: p.reason || "The model asked for a human decision." };
   }
+}
+
+const NUMBER_WORDS: Record<string, number> = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, twenty: 20, thirty: 30, forty: 40, fifty: 50, hundred: 100 };
+
+function numbersIn(s: string): Set<number> {
+  const out = new Set<number>();
+  for (const m of s.toLowerCase().matchAll(/\b(\d+(?:\.\d+)?)\b|\b([a-z]+)\b/g)) {
+    if (m[1]) out.add(Number(m[1]));
+    else if (m[2] && m[2] in NUMBER_WORDS) out.add(NUMBER_WORDS[m[2]]);
+  }
+  return out;
+}
+
+/** Deterministic conflict check used as a safety net under the model's own judgement. */
+export function conflictingValues(statement: string, targetContent: string, p: Pick<Comparison, "values_differ" | "existing_value" | "new_value">): string | null {
+  if (p.values_differ && p.existing_value?.trim() && p.new_value?.trim()) return `"${p.existing_value.trim().slice(0, 60)}" vs "${p.new_value.trim().slice(0, 60)}"`;
+  const a = numbersIn(statement);
+  const b = numbersIn(targetContent);
+  if (a.size && b.size && [...a].every((n) => !b.has(n))) return `numbers ${[...b].join(", ")} vs ${[...a].join(", ")}`;
+  return null;
 }
