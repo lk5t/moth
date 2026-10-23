@@ -334,7 +334,7 @@ export class Cortex {
 
     // A. Understand
     const ex = await this.router.generate<Extraction>({ purpose: "extract", system: EXTRACT_SYSTEM, user: `Information to remember:\n"""\n${truncate(text, 6000)}\n"""`, schema: EXTRACT_SCHEMA, maxTokens: 900, signal, projectId: project?.id });
-    providers.add(`${ex.provider}:${ex.model}`);
+    providers.add(ex.model);
     const statements = ex.data.statements.filter((s) => s.text.trim().length > 3).slice(0, 8);
     const report: LearnReport = { statements: [], applied: 0, queued: 0, rejected: 0, project: project ? { id: project.id, name: project.name } : null, providers: [], ms: 0 };
     if (!statements.length) report.note = "Nothing in this information looked worth remembering.";
@@ -359,7 +359,7 @@ export class Cortex {
           { purpose: "compare", system: COMPARE_SYSTEM, user: `Existing memories:\n${memList}\n${fbText}\nNew statement: "${s.text}"`, schema: COMPARE_SCHEMA, maxTokens: 700, signal, projectId: sProject?.id },
           { needsEscalation: (d) => (d.relation === "contradiction" && d.confidence < 0.6 ? "Complex contradiction" : d.confidence < 0.25 ? "Insufficient evidence" : null) },
         );
-        providers.add(`${cmp.provider}:${cmp.model}`);
+        providers.add(cmp.model);
         const p = cmp.data;
         outcome.relation = p.relation;
         outcome.proposed_operation = p.operation;
