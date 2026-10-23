@@ -246,7 +246,9 @@ test("downloads: resume, SHA-256 verification, zip and tar.gz extraction with tr
   fs.mkdirSync(src, { recursive: true });
   fs.writeFileSync(path.join(src, "llama-server"), "#!/bin/sh\n", { mode: 0o755 });
   const tgz = path.join(dir, "rt.tar.gz");
-  execFileSync("tar", ["-czf", tgz, "-C", path.join(dir, "tsrc"), "build"]);
+  // On Windows use the built-in bsdtar (Git's GNU tar treats "C:" as a remote host).
+  const tarBin = process.platform === "win32" ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
+  execFileSync(tarBin, ["-czf", tgz, "-C", path.join(dir, "tsrc"), "build"]);
   const tout = path.join(dir, "tar-out");
   extractTarGz(tgz, tout);
   assert.ok(findFile(tout, ["llama-server"]));

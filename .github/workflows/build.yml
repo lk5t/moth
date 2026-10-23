@@ -64,11 +64,8 @@ jobs:
         if: always()
         shell: bash
         run: |
-          f="real-ai-data/evidence.json"
-          if [ -f "$f" ]; then
-            cat "$f"
-            node -e "const e=require('./'+process.argv[1]); const s=e.steps.map(x=>x.name+': '+JSON.stringify(x.data).slice(0,700)).join('\n'); console.log('::notice title=Real AI evidence ('+e.platform+', result '+(e.result||'FAIL')+')::'+s.replace(/%/g,'%25').replace(/\n/g,'%0A'))" "$f"
-          fi
+          [ -f real-ai-data/evidence.json ] && cat real-ai-data/evidence.json
+          node .github/evidence.mjs real-ai-data/evidence.json
 
   windows:
     name: Windows installer

@@ -99,7 +99,7 @@ export function CortexPage() {
               {st.queue.pending_jobs} to analyse, {st.queue.pending_reviews} for you to review
             </Stat>
             {st.runtime.state === "ready" && st.runtime.idleUnloadAt ? (
-              <p className="text-[12px] text-ink-3 sm:col-span-2 lg:col-span-4">Unloads automatically {timeAgo(st.runtime.idleUnloadAt).replace(" ago", "")} from now if nothing else arrives (after {st.settings.idleTimeoutMin} idle minutes).</p>
+              <p className="text-[12px] text-ink-3 sm:col-span-2 lg:col-span-4">Unloads automatically in about {Math.max(1, Math.round((Date.parse(st.runtime.idleUnloadAt) - Date.now()) / 60000))} min if nothing else arrives (after {st.settings.idleTimeoutMin} idle minutes).</p>
             ) : null}
             {!st.readiness.ok && installed ? <p className="text-[12px] text-warn sm:col-span-2 lg:col-span-4">{st.readiness.reason}</p> : null}
           </section>
