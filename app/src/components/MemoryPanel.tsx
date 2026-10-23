@@ -1,9 +1,10 @@
-import { Archive, ArchiveRestore, Brain, Link2, Pencil, RotateCcw, ShieldAlert, Trash2, Undo2, X } from "lucide-react";
+import { Archive, ArchiveRestore, Brain, ExternalLink, Link2, Pencil, Pin, PinOff, RotateCcw, ShieldAlert, Trash2, Undo2, X } from "lucide-react";
 import { useState } from "react";
 import { rpc } from "../lib/api";
 import { useApp } from "../lib/app";
 import { useLive } from "../lib/hooks";
-import { CATEGORY_LABEL, RELATION_LABEL, cn, timeAgo } from "../lib/utils";
+import { openExternal } from "../lib/tauri";
+import { CATEGORY_LABEL, MEMORY_TYPE_LABEL, RELATION_LABEL, SOURCE_LABEL, cn, timeAgo } from "../lib/utils";
 import { Badge, Button, Dialog, Field, Input, Select, Tabs, Textarea } from "./ui";
 
 export function MemoryPanel() {
@@ -53,6 +54,14 @@ export function MemoryPanel() {
               <div>
                 <div className="mb-2 flex flex-wrap items-center gap-1.5">
                   <Badge tone={m.category === "error" ? "danger" : m.category === "solution" ? "ok" : m.category === "decision" ? "accent" : "neutral"}>{CATEGORY_LABEL[m.category]}</Badge>
+                  {m.memory_type ? <Badge title="Memory type">{MEMORY_TYPE_LABEL[m.memory_type] ?? m.memory_type}</Badge> : null}
+                  {m.scope === "global" && m.project_id ? null : m.scope ? <Badge title={m.scope === "global" ? "Can be used in any project" : m.scope === "project" ? "Only used for its project" : "Private"}>{m.scope === "global" ? "Reusable" : m.scope === "project" ? "Project only" : "Private"}</Badge> : null}
+                  {m.pinned ? (
+                    <Badge tone="accent" title="Pinned memories get a little extra retrieval priority">
+                      <Pin className="size-3" /> Pinned
+                    </Badge>
+                  ) : null}
+                  {m.evidence === "speculative" ? <Badge tone="warn">Speculation</Badge> : m.evidence === "unsourced" ? <Badge tone="warn">No source</Badge> : m.evidence === "sourced" ? <Badge tone="ok">Sourced</Badge> : null}
                   {m.status !== "active" ? <Badge tone="warn">{m.status === "merged" ? "Merged" : m.status === "superseded" ? "Superseded" : "Archived"}</Badge> : null}
                   {m.task_state ? <Badge tone={m.task_state === "done" ? "ok" : "neutral"}>{m.task_state === "done" ? "Done" : "Open"}</Badge> : null}
                   {m.manual_lock ? <Badge title="You wrote or corrected this; automatic updates can only add to it">Your words</Badge> : null}
@@ -66,7 +75,7 @@ export function MemoryPanel() {
                 ) : null}
               </div>
 
-              {m.flags?.includes("possible_conflict") ? <Notice tone="warn">This may contradict another memory. Both are kept until you decide in Metamorphosis.</Notice> : null}
+              {m.flags?.includes("possible_conflict") ? <Notice tone="warn">This may contradict another memory. Both are kept until you decide in the Review Queue.</Notice> : null}
               {m.flags?.includes("possible_prompt_injection") ? (
                 <Notice tone="danger">
                   <ShieldAlert className="mr-1 inline size-3.5" />
@@ -114,10 +123,34 @@ export function MemoryPanel() {
                 </ul>
               </div>
 
+              {m.sources?.length ? (
+                <div>
+                  <h3 className="mb-2 text-[13px]">Sources</h3>
+                  <ul className="space-y-1.5">
+                    {m.sources.map((s: any) => (
+                      <li key={s.id} className="rounded-[8px] border border-line px-2.5 py-2 text-[12px]">
+                        {s.url ? (
+                          <button className="flex max-w-full items-center gap-1 truncate text-left text-accent hover:text-accent-soft" onClick={() => void openExternal(s.url)} title={s.url}>
+                            <ExternalLink className="size-3 shrink-0" />
+                            <span className="truncate">{s.title || s.url}</span>
+                          </button>
+                        ) : (
+                          <span className="text-ink-2">{s.title || "Imported file"}</span>
+                        )}
+                        <p className="mt-0.5 text-[11.5px] text-ink-3">
+                          {[s.publisher, s.published_at ? `published ${s.published_at}` : null, s.retrieved_at ? `retrieved ${s.retrieved_at}` : null].filter(Boolean).join(" · ") || (s.kind === "import" ? "Imported" : "Citation")}
+                        </p>
+                        {s.excerpt ? <p className="mt-1 text-[11.5px] leading-snug text-ink-2">“{s.excerpt}”</p> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
               <dl className="grid grid-cols-[110px_1fr] gap-y-1.5 text-[12.5px]">
                 <dt className="text-ink-3">Source</dt>
                 <dd className="truncate text-ink-2" title={m.source_ref ?? ""}>
-                  {sourceLabel(m.source)}
+                  {SOURCE_LABEL[m.source] ?? m.source}
                   {m.source_ref ? ` · ${m.source_ref}` : ""}
                 </dd>
                 <dt className="text-ink-3">Created</dt>
@@ -191,6 +224,9 @@ export function MemoryPanel() {
           </Button>
           <Button size="sm" variant="ghost" onClick={() => go("mind", { focus: m.id })}>
             <Brain /> Show in Mind
+          </Button>
+          <Button size="sm" variant="ghost" title={m.pinned ? "Unpin" : "Pin: give it a little extra priority when relevant"} onClick={() => act(() => rpc("memories.pin", { id: m.id, pinned: !m.pinned }), m.pinned ? "Unpinned" : "Pinned")}>
+            {m.pinned ? <PinOff /> : <Pin />} {m.pinned ? "Unpin" : "Pin"}
           </Button>
           {m.status === "active" ? (
             <Button size="sm" variant="ghost" onClick={() => act(() => rpc("memories.archive", { id: m.id }), "Archived. It stays restorable.")}>
@@ -272,7 +308,6 @@ export function renderInline(text: string) {
 }
 
 export const actorLabel = (a: string) => ({ claude: "Claude", moth: "MOTH", user: "You", system: "System" })[a] ?? a;
-const sourceLabel = (s: string) => ({ claude: "Claude", user: "You", moth: "MOTH", obsidian: "Obsidian", google_drive: "Google Drive", gmail: "Gmail", google_calendar: "Google Calendar" })[s] ?? s;
 
 function LinkDialog({ open, onClose, from, onDone }: { open: boolean; onClose: () => void; from: any; onDone: () => void }) {
   const { toast } = useApp();

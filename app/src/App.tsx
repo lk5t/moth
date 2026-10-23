@@ -1,25 +1,33 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import { CommandPalette } from "./components/CommandPalette";
 import { MemoryEditor } from "./components/MemoryEditor";
 import { MemoryPanel } from "./components/MemoryPanel";
 import { MothMark } from "./components/MothLogo";
+import { QuickCapture } from "./components/QuickCapture";
 import { NAV, Sidebar, TitleBar, Toasts } from "./components/Shell";
-import { Button } from "./components/ui";
+import { Button, Dialog } from "./components/ui";
 import { onChanges, rpc } from "./lib/api";
-import { AppProvider, useApp } from "./lib/app";
-import { notify, setKeepInTray } from "./lib/tauri";
+import { AppProvider, useApp, type Page } from "./lib/app";
+import { notify, onShellEvent, setCaptureShortcut, setKeepInTray, trayRefresh } from "./lib/tauri";
+import { AdaptationPage } from "./pages/Adaptation";
 import { ConnectionsPage } from "./pages/Connections";
 import { CortexPage } from "./pages/Cortex";
+import { GuidePage } from "./pages/Guide";
 import { ActivityPage, TimelinePage } from "./pages/History";
+import { InboxPage } from "./pages/Inbox";
 import { MemoriesPage } from "./pages/Memories";
 import { MetamorphosisPage } from "./pages/Metamorphosis";
 import { MindPage } from "./pages/Mind";
 import { Onboarding } from "./pages/Onboarding";
 import { OverviewPage } from "./pages/Overview";
 import { ProjectsPage } from "./pages/Projects";
+import { ResearchPage } from "./pages/Research";
 import { SettingsPage } from "./pages/Settings";
 
+const isCaptureWindow = () => typeof window !== "undefined" && window.location.hash.replace("#", "").startsWith("capture");
+
 export default function App() {
+  if (isCaptureWindow()) return <QuickCapture />;
   return (
     <AppProvider>
       <Root />
@@ -30,11 +38,13 @@ export default function App() {
 function Root() {
   const [state, setState] = useState<"loading" | "onboarding" | "ready" | "error">("loading");
   const [error, setError] = useState("");
+  const [firstMemory, setFirstMemory] = useState<string | undefined>();
   const load = () =>
     rpc<any>("settings.get")
       .then((r) => {
         document.documentElement.classList.toggle("reduce-motion", !!r.settings["appearance.reduceMotion"]);
         void setKeepInTray(r.settings["app.closeToTray"] !== false);
+        void setCaptureShortcut(r.settings["quickCapture.enabled"] ? r.settings["quickCapture.shortcut"] || null : null);
         setState(r.settings["onboarding.completed"] ? "ready" : "onboarding");
       })
       .catch((e) => {
@@ -62,20 +72,32 @@ function Root() {
         </div>
       ) : state === "onboarding" ? (
         <div className="min-h-0 flex-1">
-          <Onboarding onDone={() => setState("ready")} />
+          <Onboarding
+            onDone={(id) => {
+              setFirstMemory(id);
+              setState("ready");
+            }}
+          />
         </div>
       ) : (
-        <Workspace />
+        <Workspace firstMemory={firstMemory} onRestartFirstFlight={() => setState("onboarding")} />
       )}
       <Toasts />
     </div>
   );
 }
 
-function Workspace() {
+function Workspace({ firstMemory, onRestartFirstFlight }: { firstMemory?: string; onRestartFirstFlight: () => void }) {
   const app = useApp();
-  const { page, go, setPaletteOpen, edit, select, selected } = app;
-  const notified = useRef(0);
+  const { page, go, setPaletteOpen, edit, select, selected, toast } = app;
+  const lastNotification = useRef<number | null>(null);
+  const [captureOpen, setCaptureOpen] = useState(false);
+
+  // First Flight ends in The Mind with the first memory in the spotlight.
+  useEffect(() => {
+    if (firstMemory) go("mind", { focus: firstMemory });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [firstMemory]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -93,21 +115,73 @@ function Workspace() {
     return () => window.removeEventListener("keydown", onKey);
   }, [go, setPaletteOpen, edit, select, selected, app]);
 
-  // A quiet notification when Claude teaches MOTH something while the window is in the background.
+  // Tray menu / Quick Capture window → navigate here.
   useEffect(
     () =>
-      onChanges((changes) => {
-        const learned = changes.filter((c) => c.entity === "memory" && c.op === "insert").length;
-        if (!learned || !document.hidden || Date.now() - notified.current < 60_000) return;
-        notified.current = Date.now();
-        void rpc<any>("settings.get").then((r) => {
-          if (r.settings["notifications.enabled"] && r.settings["notifications.learning"]) void notify("MOTH learned something", learned === 1 ? "1 new memory from your latest Claude session" : `${learned} new memories from your latest Claude session`);
-        });
+      onShellEvent<string>("navigate", (target) => {
+        if (target.startsWith("memory:")) {
+          select(target.slice(7));
+          return;
+        }
+        go(target as Page);
+      }),
+    [go, select],
+  );
+  // In a browser (no tray), "Quick Capture" opens an inline dialog.
+  useEffect(() => {
+    const fn = () => setCaptureOpen(true);
+    window.addEventListener("moth-capture", fn);
+    return () => window.removeEventListener("moth-capture", fn);
+  }, []);
+  // The first time the window is hidden to the tray, say so (once).
+  useEffect(
+    () =>
+      onShellEvent("hidden-to-tray", () => {
+        try {
+          if (localStorage.getItem("moth.trayHint")) return;
+          localStorage.setItem("moth.trayHint", "1");
+        } catch {
+          /* ignore */
+        }
+        void notify("MOTH is still running", "It keeps working in the tray so Claude can use it. Right-click the tray icon to quit completely.");
       }),
     [],
   );
 
-  const Page = { overview: OverviewPage, mind: MindPage, memories: MemoriesPage, projects: ProjectsPage, metamorphosis: MetamorphosisPage, cortex: CortexPage, timeline: TimelinePage, activity: ActivityPage, connections: ConnectionsPage, settings: SettingsPage }[page];
+  // Native notifications decided by the engine (it already applies your notification level).
+  useEffect(() => {
+    void rpc<any>("notifications.since", { after_id: 1e15 }).then((r) => (lastNotification.current = r.latest)).catch(() => undefined);
+    return onChanges((changes) => {
+      if (changes.some((c) => c.entity === "settings")) void trayRefresh();
+      if (!changes.some((c) => c.entity === "activity")) return;
+      if (lastNotification.current === null) return;
+      void rpc<any>("notifications.since", { after_id: lastNotification.current }).then((r) => {
+        lastNotification.current = r.latest;
+        for (const n of r.items) {
+          if (document.hasFocus()) toast({ kind: n.level === "important" ? "light" : "info", text: `${n.title}. ${n.body}` });
+          else void notify(n.title, n.body);
+        }
+      });
+    });
+  }, [toast]);
+
+  const pages: Record<Page, () => ReactElement> = {
+    overview: OverviewPage,
+    mind: MindPage,
+    memories: MemoriesPage,
+    projects: ProjectsPage,
+    metamorphosis: MetamorphosisPage,
+    cortex: CortexPage,
+    inbox: InboxPage,
+    adaptation: AdaptationPage,
+    research: ResearchPage,
+    timeline: TimelinePage,
+    activity: ActivityPage,
+    connections: ConnectionsPage,
+    settings: () => <SettingsPage onRestartFirstFlight={onRestartFirstFlight} />,
+    guide: () => <GuidePage onRestartFirstFlight={onRestartFirstFlight} />,
+  };
+  const Page = pages[page];
   return (
     <div className="flex min-h-0 flex-1">
       <Sidebar />
@@ -117,6 +191,9 @@ function Workspace() {
       <MemoryPanel />
       <CommandPalette />
       <MemoryEditor />
+      <Dialog open={captureOpen} onClose={() => setCaptureOpen(false)} title="Quick Capture" width={520}>
+        <QuickCapture embedded onClose={() => setCaptureOpen(false)} onOpen={(id) => (setCaptureOpen(false), select(id))} />
+      </Dialog>
     </div>
   );
 }

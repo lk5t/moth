@@ -5,6 +5,7 @@ import { rpc } from "../lib/api";
 import { useApp } from "../lib/app";
 import { useLive } from "../lib/hooks";
 import { cn, timeAgo } from "../lib/utils";
+import { ReviewList } from "../components/ReviewList";
 
 const gb = (b: number) => `${(b / 1024 ** 3).toFixed(b > 1024 ** 3 ? 1 : 2)} GB`;
 const mb = (b: number) => `${(b / 1024 ** 2).toFixed(0)} MB`;
@@ -30,7 +31,7 @@ const OP_LABEL: Record<string, string> = {
 };
 
 export function CortexPage() {
-  const { toast, select } = useApp();
+  const { toast, select, go } = useApp();
   const { data: st, reload } = useLive<any>("cortex.status", {}, { entities: ["cortex" as any, "review", "activity", "memory"] as any });
   const { data: reviews, reload: reloadReviews } = useLive<any[]>("cortex.reviews", {}, { entities: ["review" as any] });
   const [busy, setBusy] = useState<string | null>(null);
@@ -106,7 +107,15 @@ export function CortexPage() {
 
           {!installed || ["downloading_runtime", "extracting", "downloading_model", "verifying", "error", "cancelled"].includes(st.install.phase) ? <Setup st={st} onChange={reload} /> : null}
 
-          <ReviewQueue reviews={reviews ?? []} onDone={() => (void reloadReviews(), void reload())} />
+          <section>
+            <SectionTitle aside={reviews?.length ? <button className="hover:text-ink" onClick={() => go("inbox")}>Open Review Queue</button> : undefined}>Waiting for your approval</SectionTitle>
+            <ReviewList items={(reviews ?? []).slice(0, 3)} onDone={() => (void reloadReviews(), void reload())} empty="Nothing to review. Proposals that would replace knowledge, contradict it or that the model wasn't sure about wait in the Review Queue." />
+            {reviews && reviews.length > 3 ? (
+              <button className="mt-2 text-[12.5px] text-accent hover:text-accent-soft" onClick={() => go("inbox")}>
+                {reviews.length - 3} more in the Review Queue
+              </button>
+            ) : null}
+          </section>
 
           {installed ? <Teach ready={st.readiness.ok} /> : null}
 
@@ -281,133 +290,6 @@ function Setup({ st, onChange }: { st: any; onChange: () => void }) {
       >
         <Download /> {plan.downloadBytes ? `Download and install (${gb(plan.downloadBytes)})` : "Use this model"}
       </Button>
-    </section>
-  );
-}
-
-function ReviewQueue({ reviews, onDone }: { reviews: any[]; onDone: () => void }) {
-  const { toast, select } = useApp();
-  const [editing, setEditing] = useState<any | null>(null);
-  const [text, setText] = useState("");
-  const [rejecting, setRejecting] = useState<any | null>(null);
-  const [verdict, setVerdict] = useState("incorrect");
-  const [note, setNote] = useState("");
-  const run = async (fn: () => Promise<unknown>, ok: string) => {
-    try {
-      await fn();
-      toast({ kind: "light", text: ok });
-      onDone();
-    } catch (e) {
-      toast({ kind: "error", text: (e as Error).message });
-    }
-  };
-  return (
-    <section>
-      <SectionTitle aside={reviews.length ? `${reviews.length} waiting` : undefined}>Waiting for your approval</SectionTitle>
-      {!reviews.length ? (
-        <p className="text-[12.5px] text-ink-3">Nothing to review. Proposals that would replace knowledge, contradict it or that the model wasn't sure about will wait here.</p>
-      ) : (
-        <ul className="space-y-3">
-          {reviews.map((r) => (
-            <li key={r.id} className="panel p-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-[13.5px] text-ink">{OP_LABEL[r.operation] ?? r.operation}</span>
-                <Badge tone={r.risk === "high" ? "danger" : r.risk === "medium" ? "warn" : "neutral"}>{r.risk} risk</Badge>
-                {r.confidence != null ? <span className="text-[12px] text-ink-3">model confidence {Math.round(r.confidence * 100)}%</span> : null}
-                <span className="ml-auto text-[12px] text-ink-3">{timeAgo(r.created_at)}</span>
-              </div>
-              <p className="mt-2 text-[13px] leading-relaxed text-ink">"{r.statement}"</p>
-              {r.target ? (
-                <div className="mt-3 grid gap-2 md:grid-cols-2">
-                  <div className="rounded-[10px] border border-line px-3 py-2">
-                    <div className="text-[11.5px] text-ink-3">Now</div>
-                    <button className="text-left text-[12.5px] leading-relaxed text-ink-2 hover:text-ink" onClick={() => select(r.target.id)}>
-                      <span className="text-ink">{r.target.title}</span>: {r.target.content}
-                    </button>
-                  </div>
-                  {r.proposal.content && ["update", "flag_contradiction", "append"].includes(r.operation) ? (
-                    <div className="rounded-[10px] border border-accent/40 px-3 py-2">
-                      <div className="text-[11.5px] text-accent-soft">{r.operation === "append" ? "Would add" : "Would become"}</div>
-                      <p className="text-[12.5px] leading-relaxed text-ink">{r.proposal.content}</p>
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-              {r.proposal.values_differ && r.proposal.existing_value ? (
-                <p className="mt-2 text-[12.5px] text-ink-2">
-                  The model compared <span className="text-ink">"{r.proposal.existing_value}"</span> with <span className="text-ink">"{r.proposal.new_value}"</span>
-                  {r.proposal.signals_change ? " and read it as a change." : " but nothing says which is current."}
-                </p>
-              ) : null}
-              <p className="mt-2 text-[12px] text-ink-3">
-                Why it waits: {r.reason} Model's reason: {r.proposal.reason}
-              </p>
-              {r.operation === "review" && r.target ? <p className="text-[12px] text-ink-3">Approve adds the statement to the memory; "Edit and approve" lets you rewrite the memory instead.</p> : null}
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Button size="sm" variant="primary" onClick={() => run(() => rpc("cortex.approve", { id: r.id }), "Approved. The old version stays in history.")}>
-                  <Check /> Approve
-                </Button>
-                {["update", "flag_contradiction", "append", "create", "review"].includes(r.operation) ? (
-                  <Button size="sm" onClick={() => (setEditing(r), setText(r.operation === "review" && r.target ? r.target.content : r.proposal.content || r.statement))}>
-                    <Pencil /> Edit and approve
-                  </Button>
-                ) : null}
-                <Button size="sm" variant="ghost" onClick={() => (setRejecting(r), setNote(""), setVerdict("incorrect"))}>
-                  <X /> Reject
-                </Button>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-      <Dialog
-        open={!!editing}
-        onClose={() => setEditing(null)}
-        title="Edit before approving"
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => setEditing(null)}>
-              Cancel
-            </Button>
-            <Button variant="primary" onClick={() => run(() => rpc("cortex.approve", { id: editing.id, content: text }), "Saved your version").then(() => setEditing(null))}>
-              Approve
-            </Button>
-          </>
-        }
-      >
-        <Field label="Memory text">
-          <Textarea rows={5} value={text} onChange={(e) => setText(e.target.value)} />
-        </Field>
-      </Dialog>
-      <Dialog
-        open={!!rejecting}
-        onClose={() => setRejecting(null)}
-        title="Reject this proposal"
-        width={460}
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => setRejecting(null)}>
-              Cancel
-            </Button>
-            <Button variant="danger" onClick={() => run(() => rpc("cortex.reject", { id: rejecting.id, note, verdict }), "Rejected. MOTH will remember this next time.").then(() => setRejecting(null))}>
-              Reject
-            </Button>
-          </>
-        }
-      >
-        <div className="grid gap-3">
-          <Field label="What was wrong?">
-            <Select value={verdict} onChange={(e) => setVerdict(e.target.value)}>
-              <option value="incorrect">The change is wrong</option>
-              <option value="irrelevant">Not worth remembering</option>
-              <option value="keep_separate">These should stay separate memories</option>
-            </Select>
-          </Field>
-          <Field label="Note for MOTH (optional)" hint="Shown to the model as an example when a similar decision comes up.">
-            <Textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
-          </Field>
-        </div>
-      </Dialog>
     </section>
   );
 }

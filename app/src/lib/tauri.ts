@@ -113,3 +113,59 @@ export async function setKeepInTray(enabled: boolean): Promise<void> {
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("set_keep_in_tray", { enabled });
 }
+
+async function invokeShell<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T | null> {
+  if (!isTauri()) return null;
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<T>(cmd, args);
+}
+
+/** Opens the small Quick Capture window (desktop) — in a browser the main window shows it inline instead. */
+export async function openQuickCapture(): Promise<void> {
+  if (isTauri()) await invokeShell("open_capture");
+  else window.dispatchEvent(new CustomEvent("moth-capture"));
+}
+export const hideQuickCapture = () => invokeShell("hide_capture");
+export const openInMain = (page: string) => invokeShell("open_in_main", { page });
+export const trayRefresh = () => invokeShell("tray_refresh");
+export const quitApp = () => invokeShell("quit_app");
+/** Registers the global Quick Capture shortcut; null removes it. Returns an error message if it couldn't be used. */
+export async function setCaptureShortcut(shortcut: string | null): Promise<string | null> {
+  try {
+    await invokeShell("set_capture_shortcut", { shortcut });
+    return null;
+  } catch (e) {
+    return String((e as Error)?.message ?? e);
+  }
+}
+
+/** Listens to events from the desktop shell (navigate, capture-open, hidden-to-tray, system-state). */
+export function onShellEvent<T = unknown>(name: string, cb: (payload: T) => void): () => void {
+  if (!isTauri()) return () => undefined;
+  let off: (() => void) | null = null;
+  let cancelled = false;
+  void import("@tauri-apps/api/event").then(({ listen }) =>
+    listen<T>(name, (e) => cb(e.payload)).then((u) => {
+      if (cancelled) u();
+      else off = u;
+    }),
+  );
+  return () => {
+    cancelled = true;
+    off?.();
+  };
+}
+
+export async function currentWindowLabel(): Promise<string> {
+  if (!isTauri()) return "main";
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  return getCurrentWindow().label;
+}
+
+/** File picker for imports (Markdown, text, JSON). */
+export async function pickFiles(): Promise<string[]> {
+  if (!isTauri()) return [];
+  const d = await import("@tauri-apps/plugin-dialog");
+  const r = await d.open({ multiple: true, directory: false, filters: [{ name: "Notes", extensions: ["md", "markdown", "txt", "json"] }] });
+  return Array.isArray(r) ? r.map(String) : typeof r === "string" ? [r] : [];
+}

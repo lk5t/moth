@@ -119,7 +119,7 @@ test("relevant preferences are scoped: project preferences never leak into other
 
 test("research: sourced insights keep provenance; missing citations are never fabricated", () => {
   const b = openBrain();
-  const r = b.adaptation.submitResearch({
+  const r: any = b.adaptation.submitResearch({
     topic: "Getting more players on a Roblox game",
     domain: "Roblox / Game Design / Retention",
     project: "Cursed RNG",
@@ -158,7 +158,7 @@ test("research: sourced insights keep provenance; missing citations are never fa
   assert.match(hub.title, /^Research: /);
   assert.ok(b.store.relationshipsOf(sourced.id).some((x) => x.other_id === hub.id));
   // Submitting the same insight again adds sources instead of duplicating.
-  const again = b.adaptation.submitResearch({ topic: "Getting more players on a Roblox game", findings: [{ insight: "Research suggests that a clear and engaging introduction helps players understand the game's goal and keep playing.", basis: "evidence", sources: [{ url: "https://example.org/onboarding-study", title: "Onboarding study" }] }] });
+  const again: any = b.adaptation.submitResearch({ topic: "Getting more players on a Roblox game", findings: [{ insight: "Research suggests that a clear and engaging introduction helps players understand the game's goal and keep playing.", basis: "evidence", sources: [{ url: "https://example.org/onboarding-study", title: "Onboarding study" }] }] });
   assert.equal(again.stored[0].id, sourced.id);
   assert.equal(b.adaptation.sourcesOf(sourced.id).length, 2);
   b.close();

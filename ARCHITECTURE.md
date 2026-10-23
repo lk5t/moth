@@ -144,3 +144,27 @@ from the newest healthy backup automatically.
 * `core/test-real/cortex.real.test.ts` — **real** llama.cpp + Qwen2.5 1.5B, installed through MOTH's own
   installer, running the inventory 6 → 10 slots acceptance scenario. Runs in CI on Linux and Windows
   (`Real local AI` jobs); evidence is published as a job annotation.
+
+## v0.2.5 — First Flight & Adaptation
+
+### Data (migration v3, additive)
+- `memories` gain `memory_type` (episodic, semantic, procedural, project, preference, research, lesson), `scope` (global/project/private), `pinned`, `domain`, `evidence` (sourced/unsourced/speculative). Existing rows are backfilled from their category.
+- `projects` gain `transfer_enabled` and `private`.
+- New tables: `memory_sources` (provenance: URL, title, publisher, dates, excerpt — stored exactly as submitted), `preference_meta` + `preference_evidence` (Adaptation profile), `lesson_meta`, `transfer_suggestions`, `inbox_files` (Claude Inbox de-duplication). `review_queue` gains `kind`, `deferred_until`, `affected_ids`, `sources`.
+- Settings changes now appear in the change feed, so the tray and every window stay in sync.
+
+### Engine modules
+- `engine/adaptation.ts` — preferences (explicit = confirmed; inferred = tentative until seen `adaptation.inferAfter` times and confirmed by the user in the Review Queue; never promoted automatically), relevance-ranked retrieval per task with scope rules, research memory with provenance (claims of evidence without sources go to review; speculation is labelled; URLs are never invented), lessons from verified corrections, knowledge transfer (research/lessons/procedures only, never private projects or other projects' decisions).
+- `engine/review.ts` — the unified Memory Inbox (approve / edit / reject / defer) dispatching by kind or handler; rejections are recorded as feedback.
+- `engine/folders.ts` — Claude Inbox folder (any Claude can drop .md/.txt/.json files; imported, then moved to `Imported/`, never deleted), vault sync, MD/TXT/JSON file import with content-hash de-duplication.
+- `api/pulse.ts` — MOTH Pulse and the filtered Memory Timeline, computed from the audit trail.
+- Brain: Privacy Mode and "learning paused" hold automatic jobs in the queue (they never resume by themselves), resource profiles (Eco/Balanced/Performance change model idle unload and when maintenance runs), Sleep Cycle scheduling (idle / after a Claude session / manual) using Windows idle time and power state reported by the shell, CPU-load deferral, notifications with levels, integrity-checked backups with a configurable folder and retention, and a graceful shutdown that drains the job queue, unloads the model and checkpoints the database.
+
+### MCP (24 tools)
+New: `moth_record_preference`, `moth_get_preferences`, `moth_submit_research`, `moth_record_lesson`, `moth_get_project_insights`. `moth_begin_task` now also returns `preferences` and `knowledge_transfer`.
+
+### What is automatic, and what isn't
+MOTH cannot observe Claude conversations. It learns from (a) MCP tool calls Claude makes, (b) Claude Code hooks (optional), (c) files placed in the Claude Inbox folder, (d) what the user enters (Quick Capture, editing). Organising, linking, backups and Sleep Cycles are automatic.
+
+### Desktop shell
+Tray menu: Open MOTH, Open The Mind, Open Cortex, Quick Capture, Pause/Resume Learning, Privacy Mode, Settings, Restart memory engine, Quit MOTH Completely. Close hides to the tray when enabled; double-click restores. Global Quick Capture shortcut (default Ctrl+Alt+M, configurable) opens a small always-on-top window. "Start with Windows" starts minimised without loading the model. Quit asks the engine to stop cleanly and only force-stops it after 15 s.

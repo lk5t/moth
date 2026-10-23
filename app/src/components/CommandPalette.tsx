@@ -1,10 +1,11 @@
-import { CornerDownLeft, FilePlus2, Search, Sparkles } from "lucide-react";
+import { CornerDownLeft, DatabaseBackup, FilePlus2, FolderInput, FolderKanban, Moon, PauseCircle, Search, ShieldOff, Sparkles, Stethoscope, Zap } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { rpc } from "../lib/api";
 import { useApp } from "../lib/app";
 import { CATEGORY_LABEL, cn } from "../lib/utils";
-import { NAV } from "./Shell";
+import { openQuickCapture } from "../lib/tauri";
+import { ALL_PAGES } from "./Shell";
 
 interface Item {
   id: string;
@@ -21,7 +22,14 @@ export function CommandPalette() {
   const [results, setResults] = useState<any[]>([]);
   const [answer, setAnswer] = useState<any | null>(null);
   const [active, setActive] = useState(0);
+  const [projects, setProjects] = useState<any[]>([]);
+  const [sys, setSys] = useState<any>(null);
   const input = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    void rpc<any[]>("projects.list").then(setProjects).catch(() => undefined);
+    void rpc<any>("system.state").then(setSys).catch(() => undefined);
+  }, [open]);
 
   useEffect(() => {
     if (open) {
@@ -70,26 +78,49 @@ export function CommandPalette() {
           rpc("search.ask", { query: q }).then(setAnswer).catch((e) => setAnswer({ answer: e.message, refs: [] }));
         },
       });
-    for (const n of NAV)
+    for (const n of ALL_PAGES)
       if (!ql || n.label.toLowerCase().includes(ql))
-        out.push({ id: `nav-${n.page}`, group: "Go to", icon: n.icon, label: n.label, hint: `Ctrl ${n.key}`, run: () => (go(n.page), close()) });
+        out.push({ id: `nav-${n.page}`, group: "Go to", icon: n.icon, label: n.label, hint: n.key ? `Ctrl ${n.key}` : undefined, run: () => (go(n.page), close()) });
+    for (const p of projects.slice(0, ql ? 20 : 4))
+      if (!ql || p.name.toLowerCase().includes(ql)) out.push({ id: `prj-${p.id}`, group: "Projects", icon: <FolderKanban />, label: p.name, hint: `${p.memory_count} memories`, run: () => (go("projects", { id: p.id }), close()) });
+    const say = (text: string) => toast({ kind: "light", text });
+    const fail = (e: Error) => toast({ kind: "error", text: e.message });
     const actions: Item[] = [
       { id: "new", group: "Actions", icon: <FilePlus2 />, label: "New memory", hint: "Ctrl N", run: () => (edit("new"), close()) },
+      { id: "capture", group: "Actions", icon: <Zap />, label: "Quick Capture", hint: "Ctrl Alt M", run: () => (close(), void openQuickCapture()) },
       {
-        id: "reflect",
+        id: "sleep",
         group: "Actions",
-        icon: <Sparkles />,
-        label: "Run a Metamorphosis reflection now",
+        icon: <Moon />,
+        label: "Run a Sleep Cycle now (tidy and connect memories)",
         run: () => {
           close();
-          rpc("meta.reflect").then(() => toast({ kind: "light", text: "Reflection finished. See Metamorphosis for what changed." })).catch((e) => toast({ kind: "error", text: e.message }));
+          rpc("sleep.run").then(() => say("Sleep Cycle started. Results appear in the Timeline.")).catch(fail);
         },
       },
+      { id: "backup", group: "Actions", icon: <DatabaseBackup />, label: "Back up now", run: () => (close(), void rpc<any>("backup.create").then((r) => say(`Backup saved: ${r.name}`)).catch(fail)) },
+      {
+        id: "privacy",
+        group: "Actions",
+        icon: <ShieldOff />,
+        label: sys?.privacy ? "Turn Privacy Mode off" : "Turn Privacy Mode on",
+        run: () => (close(), void rpc("privacy.set", { on: !sys?.privacy }).then(() => say(sys?.privacy ? "Privacy Mode off. Learning resumes." : "Privacy Mode on. MOTH stopped learning automatically.")).catch(fail)),
+      },
+      {
+        id: "pause",
+        group: "Actions",
+        icon: <PauseCircle />,
+        label: sys?.learning_paused ? "Resume learning" : "Pause learning",
+        run: () => (close(), void rpc("automation.pause", { paused: !sys?.learning_paused }).then(() => say(sys?.learning_paused ? "Learning resumed" : "Learning paused")).catch(fail)),
+      },
+      { id: "inbox-scan", group: "Actions", icon: <FolderInput />, label: "Check the Claude Inbox folder now", run: () => (close(), void rpc<any>("folders.scanInbox").then((r) => say(r.skipped ? r.skipped : `Imported ${r.imported} memories from ${r.files} file(s)`)).catch(fail)) },
+      { id: "diag", group: "Actions", icon: <Stethoscope />, label: "Run connection diagnostics", run: () => (close(), go("connections", { tab: "diagnostics" })) },
+      { id: "reflect", group: "Actions", icon: <Sparkles />, label: "Open Sleep Cycle details", run: () => (close(), go("metamorphosis")) },
     ];
     for (const a of actions) if (!ql || String(a.label).toLowerCase().includes(ql)) out.push(a);
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [results, q]);
+  }, [results, q, projects, sys]);
 
   useEffect(() => setActive(0), [items.length]);
 

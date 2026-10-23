@@ -1,149 +1,184 @@
-import { ArrowUpRight, FilePlus2 } from "lucide-react";
+// Overview = MOTH Pulse: a live dashboard. Every number and event comes from MOTH's database.
+import { Activity, ArrowUpRight, BookOpenCheck, Brain, Cpu, FilePlus2, GitBranch, Inbox, Link2, Pin, Plug, ShieldOff, Sparkles, UserRound } from "lucide-react";
+import type { ReactNode } from "react";
 import { MothMark } from "../components/MothLogo";
 import { Badge, Button, SectionTitle } from "../components/ui";
 import { GraphCanvas } from "../graph/GraphCanvas";
-import { useApp } from "../lib/app";
+import { useApp, type Page } from "../lib/app";
 import { useLive } from "../lib/hooks";
-import { CATEGORY_LABEL, plural, timeAgo } from "../lib/utils";
-import { actorLabel } from "../components/MemoryPanel";
+import { MEMORY_TYPE_LABEL, cn, plural, timeAgo } from "../lib/utils";
 
 const PREVIEW_SETTINGS = { centerForce: 0.14, repelForce: 120, linkForce: 0.35, linkDistance: 34, nodeSize: 0.9, linkThickness: 1, textFadeThreshold: 9, showLabels: false, animate: true, colorBy: "none" as const, showArrows: false };
+const STATE_TEXT: Record<string, string> = { unloaded: "Asleep (loads on demand)", starting: "Loading", ready: "Loaded", busy: "Thinking", stopping: "Unloading", error: "Error" };
 
 export function OverviewPage() {
   const { go, select, edit } = useApp();
-  const { data } = useLive<any>("overview");
+  const { data: p } = useLive<any>("pulse", {}, { entities: ["memory", "relationship", "project", "learning", "review", "activity", "settings" as any, "cortex" as any] });
+  const { data: ov } = useLive<any>("overview");
   const { data: graph } = useLive<any>("graph.get", {}, { entities: ["memory", "relationship"] });
-  const s = data?.stats;
+  const t = p?.totals;
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className="mx-auto grid max-w-[1280px] gap-6 px-8 py-7 xl:grid-cols-[1fr_380px]">
-        <section className="min-w-0">
-          <div className="mb-4">
-            <h1 className="text-[22px]">Your mind</h1>
-            <p className="mt-1 max-w-[64ch] text-[14px] leading-relaxed text-ink-2">
-              {s ? (
-                s.total_memories ? (
+      <div className="mx-auto max-w-[1320px] px-8 py-7">
+        <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 className="flex items-center gap-2 text-[22px]">
+              MOTH Pulse <span className="relative ml-1 inline-flex size-2"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-40" /><span className="relative inline-flex size-2 rounded-full bg-accent" /></span>
+            </h1>
+            <p className="mt-1 text-[13.5px] text-ink-2">
+              {p ? (
+                t.memories ? (
                   <>
-                    MOTH holds <span className="text-ink">{plural(s.total_memories, "memory", "memories")}</span> across <span className="text-ink">{plural(s.active_projects, "project")}</span>, linked by{" "}
-                    <span className="text-ink">{plural(s.total_relationships, "connection")}</span>.{" "}
-                    {s.created_today || s.updated_today ? `Today it learned ${plural(s.created_today, "new thing")}${s.updated_today ? ` and refined ${plural(s.updated_today, "memory", "memories")}` : ""}.` : "Nothing new today yet."}
+                    Today: <span className="text-ink">{plural(p.today.created, "new memory", "new memories")}</span>, <span className="text-ink">{plural(p.today.updated, "update")}</span>, <span className="text-ink">{plural(p.today.connections, "new connection")}</span>.
                   </>
                 ) : (
-                  "Nothing remembered yet. Connect Claude and the first things it learns will appear here."
+                  "Nothing remembered yet. Connect Claude or add a memory and it will show up here live."
                 )
               ) : (
-                <span className="skeleton inline-block h-4 w-80 align-middle" />
+                <span className="skeleton inline-block h-4 w-72 align-middle" />
               )}
             </p>
           </div>
-          <button onClick={() => go("mind")} className="group relative block h-[420px] w-full overflow-hidden rounded-[16px] border border-line text-left" aria-label="Open The Mind">
-            {graph ? <GraphCanvas nodes={graph.nodes} links={graph.links} settings={PREVIEW_SETTINGS} compact /> : <div className="h-full bg-graph" />}
-            <span className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full border border-line bg-[#161616]/90 px-3 py-1 text-[12px] text-ink-2 transition-colors group-hover:text-ink">
-              Open The Mind <ArrowUpRight className="size-3.5" />
-            </span>
-            {graph && graph.nodes.length === 0 ? (
-              <div className="absolute inset-0 grid place-items-center text-center">
-                <div>
-                  <MothMark size={42} glow className="mx-auto text-accent-soft" />
-                  <p className="mt-3 text-[13px] text-ink-2">Follow the light. Remember the journey.</p>
-                </div>
-              </div>
-            ) : null}
-          </button>
+          {p ? (
+            <div className="flex flex-wrap gap-1.5">
+              {p.state.privacy ? <Badge tone="warn"><ShieldOff className="size-3" /> Privacy Mode</Badge> : null}
+              {p.state.learning_paused ? <Badge tone="warn">Learning paused</Badge> : null}
+              {p.state.defer_reason && !p.state.privacy && !p.state.learning_paused ? <Badge title="Background work waits">{p.state.defer_reason}</Badge> : null}
+              <Badge title="Resource profile">{p.state.profile === "eco" ? "Eco" : p.state.profile === "performance" ? "Performance" : "Balanced"}</Badge>
+            </div>
+          ) : null}
+        </div>
 
-          <div className="mt-6 grid gap-6 md:grid-cols-2">
+        <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4 xl:grid-cols-8">
+          <Tile icon={<Brain />} label="Memories" value={t?.memories} onClick={() => go("memories")} />
+          <Tile icon={<Link2 />} label="Connections" value={t?.relationships} onClick={() => go("mind")} />
+          <Tile icon={<GitBranch />} label="Active projects" value={t?.active_projects} hint={t ? `${t.projects} total` : undefined} onClick={() => go("projects")} />
+          <Tile icon={<Inbox />} label="Pending reviews" value={t?.pending_reviews} tone={t?.pending_reviews ? "accent" : undefined} hint={t?.deferred_reviews ? `${t.deferred_reviews} deferred` : undefined} onClick={() => go("inbox")} />
+          <Tile icon={<UserRound />} label="Preferences" value={t?.preferences} onClick={() => go("adaptation")} />
+          <Tile icon={<BookOpenCheck />} label="Research" value={t?.research} onClick={() => go("research")} />
+          <Tile icon={<Sparkles />} label="Lessons" value={t?.lessons} onClick={() => go("research", { tab: "lessons" })} />
+          <Tile icon={<Pin />} label="Pinned" value={t?.pinned} onClick={() => go("memories", { pinned: "1" })} />
+        </div>
+
+        <div className="mt-6 grid gap-6 xl:grid-cols-[1fr_400px]">
+          <section className="min-w-0">
+            <button onClick={() => go("mind")} className="group relative block h-[380px] w-full overflow-hidden rounded-[16px] border border-line text-left" aria-label="Open The Mind">
+              {graph ? <GraphCanvas nodes={graph.nodes} links={graph.links} settings={PREVIEW_SETTINGS} compact /> : <div className="h-full bg-graph" />}
+              <span className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full border border-line bg-[#161616]/90 px-3 py-1 text-[12px] text-ink-2 transition-colors group-hover:text-ink">
+                Open The Mind <ArrowUpRight className="size-3.5" />
+              </span>
+              {graph && graph.nodes.length === 0 ? (
+                <div className="absolute inset-0 grid place-items-center text-center">
+                  <div>
+                    <MothMark size={42} glow className="mx-auto text-accent-soft" />
+                    <p className="mt-3 text-[13px] text-ink-2">Follow the light. Remember the journey.</p>
+                  </div>
+                </div>
+              ) : null}
+            </button>
+
+            <div className="mt-6 grid gap-6 md:grid-cols-3">
+              <MiniList title="Recently created" empty="Nothing yet." items={(p?.recent.created ?? []).map((m: any) => ({ id: m.id, title: m.title, sub: `${MEMORY_TYPE_LABEL[m.memory_type] ?? ""} · ${timeAgo(m.created_at)}` }))} onOpen={select} action={!t?.memories ? <Button size="sm" onClick={() => edit("new")}><FilePlus2 /> Add one</Button> : null} />
+              <MiniList title="Recently updated" empty="No updates yet." items={(p?.recent.updated ?? []).map((m: any) => ({ id: m.id, title: m.title, sub: `version ${m.version} · ${timeAgo(m.updated_at)}` }))} onOpen={select} />
+              <MiniList title="New connections" empty="No connections yet." items={(p?.recent.connections ?? []).map((r: any) => ({ id: r.a_id, title: `${r.a_title} ↔ ${r.b_title}`, sub: `${r.reason} · ${timeAgo(r.created_at)}` }))} onOpen={select} />
+            </div>
+          </section>
+
+          <aside className="space-y-5">
+            <div className="grid grid-cols-2 gap-2.5">
+              <Health
+                icon={<Cpu />}
+                title="Cortex"
+                ok={!!p?.cortex.readiness.ok}
+                line={p ? (p.cortex.readiness.ok ? STATE_TEXT[p.cortex.state] ?? p.cortex.state : p.cortex.readiness.reason) : "…"}
+                sub={p?.cortex.queue ? `${p.cortex.queue} job(s) queued` : p?.cortex.idle_unload_at ? `unloads ${timeAgo(p.cortex.idle_unload_at).replace(" ago", "")}` : undefined}
+                onClick={() => go("cortex")}
+              />
+              <Health
+                icon={<Plug />}
+                title="Claude (MCP)"
+                ok={!!p?.mcp.last_success}
+                line={p ? (p.mcp.claude_connected ? "Connected now" : p.mcp.last_success ? `Last used ${timeAgo(p.mcp.last_success.at)}` : "No calls recorded yet") : "…"}
+                sub={p?.mcp.recent_errors ? `${p.mcp.recent_errors} recent error(s)` : p?.mcp.last_success ? p.mcp.last_success.tool.replace("moth_", "").replace(/_/g, " ") : undefined}
+                warn={!!p?.mcp.recent_errors}
+                onClick={() => go("connections")}
+              />
+            </div>
+
             <div>
-              <SectionTitle aside={<button onClick={() => go("memories")} className="hover:text-ink">All memories</button>}>Recently learned</SectionTitle>
-              <ul className="divide-y divide-line rounded-[12px] border border-line">
-                {(data?.recent_memories ?? []).map((m: any) => (
-                  <li key={m.id}>
-                    <button onClick={() => select(m.id)} className="flex w-full items-start gap-3 px-3.5 py-2.5 text-left hover:bg-surface">
-                      <span className="mt-[7px] size-1.5 shrink-0 rounded-full bg-node" />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[13px] text-ink">{m.title}</span>
-                        <span className="block text-[12px] text-ink-3">
-                          {CATEGORY_LABEL[m.category]}, {timeAgo(m.created_at)} from {actorLabel(m.source)}
-                        </span>
+              <SectionTitle aside={<button onClick={() => go("timeline")} className="hover:text-ink">Timeline</button>}>
+                <span className="flex items-center gap-1.5"><Activity className="size-3.5" /> Live activity</span>
+              </SectionTitle>
+              <ol className="max-h-[520px] space-y-0.5 overflow-y-auto pr-1">
+                {(p?.feed ?? []).map((e: any) => (
+                  <li key={e.id}>
+                    <button disabled={!e.memory_id} onClick={() => e.memory_id && select(e.memory_id)} className="group flex w-full gap-3 rounded-[8px] px-2 py-1.5 text-left enabled:hover:bg-surface">
+                      <span className={cn("mt-[6px] size-1.5 shrink-0 rounded-full", e.status === "error" ? "bg-danger" : /conflict|failed/i.test(e.label) ? "bg-warn" : /Connection|connected/i.test(e.label) ? "bg-accent" : "bg-line-strong")} />
+                      <span className="min-w-0 flex-1 text-[12.5px] leading-snug">
+                        <span className="text-ink">{e.label}</span>
+                        {e.description ? <span className="block truncate text-ink-2" title={e.description}>{e.description}</span> : null}
+                        <span className="block text-[11.5px] text-ink-3">{timeAgo(e.at)}</span>
                       </span>
                     </button>
                   </li>
                 ))}
-                {data && !data.recent_memories.length ? (
-                  <li className="px-4 py-6 text-center text-[12.5px] text-ink-3">
-                    <Button size="sm" onClick={() => edit("new")}>
-                      <FilePlus2 /> Add the first memory
-                    </Button>
-                  </li>
-                ) : null}
-              </ul>
-            </div>
-            <div>
-              <SectionTitle aside={<button onClick={() => go("timeline")} className="hover:text-ink">Timeline</button>}>Recent activity</SectionTitle>
-              <ol className="space-y-2.5 border-l border-line pl-4">
-                {(data?.recent_events ?? []).slice(0, 8).map((e: any) => (
-                  <li key={e.id} className="relative text-[12.5px] leading-snug">
-                    <span className="absolute -left-[19.5px] top-1.5 size-1.5 rounded-full bg-line-strong" />
-                    <span className="text-ink">{e.description}</span>
-                    <span className="block text-ink-3">
-                      {actorLabel(e.actor)}, {timeAgo(e.created_at)}
-                    </span>
-                  </li>
-                ))}
-                {data && !data.recent_events.length ? <li className="text-[12.5px] text-ink-3">No activity yet.</li> : null}
+                {p && !p.feed.length ? <li className="px-2 text-[12.5px] text-ink-3">No activity yet.</li> : null}
               </ol>
             </div>
-          </div>
-        </section>
 
-        <aside className="space-y-6">
-          <div className="panel p-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-[14px]">Claude</h2>
-              {data ? <Badge tone={data.connection.claude_connected ? "ok" : "neutral"}>{data.connection.claude_connected ? "Connected now" : "Not connected now"}</Badge> : null}
+            <div>
+              <SectionTitle aside={<button onClick={() => go("metamorphosis")} className="hover:text-ink">Sleep Cycle</button>}>Growth, last 14 days</SectionTitle>
+              <Sparkline points={(ov?.growth ?? []).map((g: any) => g.memories)} />
+              <p className="mt-2 text-[12px] text-ink-3">{p?.state.sleep.last_run ? `Last Sleep Cycle ${timeAgo(p.state.sleep.last_run)}.` : "No Sleep Cycle has run yet."} {p?.state.backup.last_ok ? `Last backup ${timeAgo(p.state.backup.last_ok)}.` : "No backup yet."}</p>
             </div>
-            <p className="mt-2 text-[12.5px] leading-relaxed text-ink-2">
-              {data?.connection.last_success
-                ? `Last memory request: ${data.connection.last_success.action.replace("moth_", "").replace(/_/g, " ")}, ${timeAgo(data.connection.last_success.created_at)}.`
-                : data?.connection.desktop || data?.connection.code
-                  ? "Set up. Claude hasn't used MOTH yet; open Claude and start a task."
-                  : "Claude can't use MOTH until you connect it."}
-            </p>
-            <Button size="sm" className="mt-3" onClick={() => go("connections")}>
-              {data?.connection.desktop || data?.connection.code ? "Manage connection" : "Connect Claude"}
-            </Button>
-          </div>
-
-          <div>
-            <SectionTitle aside={<button onClick={() => go("metamorphosis")} className="hover:text-ink">Details</button>}>Growth, last 14 days</SectionTitle>
-            <Sparkline points={(data?.growth ?? []).map((g: any) => g.memories)} />
-            {s ? (
-              <p className="mt-2 text-[12.5px] text-ink-2">
-                {s.duplicates_consolidated ? `${plural(s.duplicates_consolidated, "duplicate")} consolidated. ` : ""}
-                {s.open_conflicts ? `${plural(s.open_conflicts, "possible contradiction")} to review.` : "No contradictions waiting."}
-              </p>
-            ) : null}
-          </div>
-
-          <div>
-            <SectionTitle aside={<button onClick={() => go("projects")} className="hover:text-ink">All projects</button>}>Projects</SectionTitle>
-            <ul className="space-y-1">
-              {(data?.projects ?? []).map((p: any) => (
-                <li key={p.id}>
-                  <button onClick={() => go("projects", { id: p.id })} className="flex w-full items-center justify-between rounded-[8px] px-2.5 py-2 text-left hover:bg-surface">
-                    <span className="min-w-0">
-                      <span className="block truncate text-[13px] text-ink">{p.name}</span>
-                      <span className="block truncate text-[12px] text-ink-3">{p.status || p.description || "No status yet"}</span>
-                    </span>
-                    <span className="ml-3 shrink-0 text-[12px] tabular-nums text-ink-3">{p.memory_count}</span>
-                  </button>
-                </li>
-              ))}
-              {data && !data.projects.length ? <li className="px-2.5 text-[12.5px] text-ink-3">Projects appear when Claude reports work on one.</li> : null}
-            </ul>
-          </div>
-        </aside>
+          </aside>
+        </div>
       </div>
+    </div>
+  );
+}
+
+function Tile({ icon, label, value, hint, tone, onClick }: { icon: ReactNode; label: string; value: number | undefined; hint?: string; tone?: "accent"; onClick: () => void }) {
+  return (
+    <button onClick={onClick} className={cn("panel group px-3 py-2.5 text-left transition-colors hover:border-line-strong [&_svg]:size-3.5", tone === "accent" && "border-[color-mix(in_srgb,var(--color-accent)_40%,transparent)]")}>
+      <div className="flex items-center gap-1.5 text-[11.5px] text-ink-3">
+        {icon} {label}
+      </div>
+      <div className={cn("mt-1 text-[20px] tabular-nums", tone === "accent" ? "text-accent-soft" : "text-ink")}>{value === undefined ? <span className="skeleton inline-block h-5 w-10" /> : value.toLocaleString()}</div>
+      {hint ? <div className="text-[11px] text-ink-3">{hint}</div> : null}
+    </button>
+  );
+}
+
+function Health({ icon, title, ok, line, sub, warn, onClick }: { icon: ReactNode; title: string; ok: boolean; line: string; sub?: string; warn?: boolean; onClick: () => void }) {
+  return (
+    <button onClick={onClick} className="panel px-3 py-2.5 text-left hover:border-line-strong [&_svg]:size-3.5">
+      <div className="flex items-center gap-1.5 text-[12px] text-ink-2">
+        {icon} {title}
+        <span className={cn("ml-auto size-1.5 rounded-full", warn ? "bg-warn" : ok ? "bg-ok" : "bg-ink-3")} />
+      </div>
+      <div className="mt-1 text-[12.5px] leading-snug text-ink">{line}</div>
+      {sub ? <div className="mt-0.5 truncate text-[11.5px] text-ink-3">{sub}</div> : null}
+    </button>
+  );
+}
+
+function MiniList({ title, items, empty, onOpen, action }: { title: string; items: { id: string; title: string; sub: string }[]; empty: string; onOpen: (id: string) => void; action?: ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <SectionTitle>{title}</SectionTitle>
+      <ul className="space-y-0.5">
+        {items.map((m, i) => (
+          <li key={`${m.id}-${i}`}>
+            <button onClick={() => onOpen(m.id)} className="w-full rounded-[8px] px-2 py-1.5 text-left hover:bg-surface">
+              <span className="block truncate text-[12.5px] text-ink">{m.title}</span>
+              <span className="block truncate text-[11.5px] text-ink-3">{m.sub}</span>
+            </button>
+          </li>
+        ))}
+        {!items.length ? <li className="px-2 py-1 text-[12px] text-ink-3">{empty}{action ? <div className="mt-2">{action}</div> : null}</li> : null}
+      </ul>
     </div>
   );
 }
@@ -163,3 +198,5 @@ export function Sparkline({ points, height = 56 }: { points: number[]; height?: 
     </svg>
   );
 }
+
+export type { Page };

@@ -196,10 +196,10 @@ export function connectionStatus(brain: Brain): Row {
     const live = s.status === "connected" && (s.transport === "http" ? recent : alive(Number(s.pid)));
     return { ...s, live };
   });
-  const lastCall = brain.db.get<Row>("SELECT * FROM activity_logs WHERE kind = 'mcp_call' AND source <> 'moth-self-test' ORDER BY id DESC LIMIT 1");
-  const lastOk = brain.db.get<Row>("SELECT * FROM activity_logs WHERE kind = 'mcp_call' AND status = 'ok' AND source <> 'moth-self-test' ORDER BY id DESC LIMIT 1");
-  const recentCalls = brain.store.listActivity({ kind: "mcp_call", limit: 30 });
-  const errors = brain.db.all<Row>("SELECT * FROM activity_logs WHERE kind IN ('mcp_call','mcp_auth') AND status = 'error' ORDER BY id DESC LIMIT 10");
+  const lastCall = brain.db.get<Row>("SELECT * FROM activity_logs WHERE kind = 'mcp_call' AND source NOT LIKE 'moth-self-test%' ORDER BY id DESC LIMIT 1");
+  const lastOk = brain.db.get<Row>("SELECT * FROM activity_logs WHERE kind = 'mcp_call' AND status = 'ok' AND source NOT LIKE 'moth-self-test%' ORDER BY id DESC LIMIT 1");
+  const recentCalls = brain.store.listActivity({ kind: "mcp_call", limit: 40 }).filter((a) => !String(a.source).startsWith("moth-self-test")).slice(0, 30);
+  const errors = brain.db.all<Row>("SELECT * FROM activity_logs WHERE kind IN ('mcp_call','mcp_auth') AND status = 'error' AND source NOT LIKE 'moth-self-test%' ORDER BY id DESC LIMIT 10");
   const live = sessions.filter((s) => s.live);
   return {
     claude_connected: live.some((s) => /claude/i.test(String(s.client_name ?? ""))),

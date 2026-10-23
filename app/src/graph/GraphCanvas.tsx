@@ -263,7 +263,7 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
 
   // ------------------------------------------------------------------ helpers
   const toGraph = (clientX: number, clientY: number) => {
-    const rect = canvas.current!.getBoundingClientRect();
+    const rect = canvas.current?.getBoundingClientRect() ?? { left: 0, top: 0 };
     const t = transform.current;
     return { x: (clientX - rect.left - t.x) / t.k, y: (clientY - rect.top - t.y) / t.k };
   };
@@ -353,7 +353,8 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
   useEffect(() => {
     const c = canvas.current!;
     const resize = () => {
-      const r = wrap.current!.getBoundingClientRect();
+      if (!wrap.current) return;
+      const r = wrap.current.getBoundingClientRect();
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       size.current = { w: r.width, h: r.height, dpr };
       c.width = Math.round(r.width * dpr);

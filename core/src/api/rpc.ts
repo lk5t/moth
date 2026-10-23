@@ -100,7 +100,7 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
     "memories.get": (p: { id: string }) => {
       const br = b();
       const m = br.readMemory(req(p.id, "id"), false);
-      return { ...m, history: br.store.listEvents({ memory_id: p.id, limit: 50 }), versions: br.store.versions(p.id) };
+      return { ...m, history: br.store.listEvents({ memory_id: p.id, limit: 50 }), versions: br.store.versions(p.id), sources: br.adaptation.sourcesOf(p.id) };
     },
     "memories.create": (p: any) => {
       const br = b();
@@ -227,6 +227,13 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
 
     // ---------------------------------------------------------------- v0.2.5: Pulse, Timeline, First Flight, Quick Capture
     pulse: () => pulse(b()),
+    "notifications.since": (p: { after_id?: number } = {}) => {
+      const br = b();
+      const after = Number(p?.after_id ?? 0);
+      const rows = br.db.all<Row>("SELECT id, detail, created_at FROM activity_logs WHERE kind = 'notification' AND id > ? ORDER BY id ASC LIMIT 20", [after]);
+      const latest = Number(br.db.value("SELECT MAX(id) FROM activity_logs") ?? 0);
+      return { latest, items: rows.map((r) => ({ id: r.id, at: r.created_at, ...JSON.parse(String(r.detail)) })) };
+    },
     "timeline.query": (p: any = {}) => timeline(b(), p ?? {}),
     "firstFlight.get": () => b().settings.get("firstFlight"),
     "firstFlight.save": (p: { step?: number; skipped?: string[]; completed?: boolean; firstMemoryId?: string }) => {
@@ -303,9 +310,10 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
     "cortex.pause": (p: { paused: boolean }) => (b().settings.set("cortex.paused", !!p.paused), { paused: !!p.paused }),
     "cortex.learn": (p: { text: string; project?: string; analyze_only?: boolean }) => ({ job_id: b().cortex.enqueueLearn({ text: req(p.text, "text"), project: p.project || null, source: "user", analyze_only: !!p.analyze_only }, "app") }),
     "cortex.job": async (p: { id: number; wait?: number }) => (await b().cortex.waitForJob(Number(p.id), Math.min(Number(p.wait ?? 0), 25) * 1000)) ?? { id: p.id, status: "pending" },
-    "cortex.reviews": (p: { status?: string } = {}) => b().cortex.listReviews(p?.status ?? "pending"),
-    "cortex.approve": (p: { id: number; content?: string; title?: string }) => b().cortex.approve(Number(p.id), { content: p.content, title: p.title }),
-    "cortex.reject": (p: { id: number; note?: string; verdict?: "incorrect" | "irrelevant" | "keep_separate" }) => b().cortex.reject(Number(p.id), p.note, p.verdict),
+    // The Cortex page shows the same unified Memory Inbox; approvals route by item kind.
+    "cortex.reviews": (p: { status?: string } = {}) => b().inbox.list({ status: p?.status ?? "pending" }),
+    "cortex.approve": (p: { id: number; content?: string; title?: string }) => b().inbox.approve(Number(p.id), { ...(p.content ? { content: p.content } : {}), ...(p.title ? { title: p.title } : {}) }),
+    "cortex.reject": (p: { id: number; note?: string; verdict?: "incorrect" | "irrelevant" | "keep_separate" }) => b().inbox.reject(Number(p.id), p.note, p.verdict),
     "cortex.feedback": (p: { subject_type: any; subject_id: string; verdict: string; note?: string }) => ({ id: b().cortex.recordFeedback({ subject_type: p.subject_type, subject_id: String(p.subject_id), verdict: p.verdict, note: p.note }) }),
     "cortex.retrievalFeedback": (p: { query?: string; useful?: string[]; not_useful?: string[] }) => ({ recorded: b().cortex.recordRetrievalFeedback({ ...p, source: "user" }) }),
 

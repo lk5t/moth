@@ -1,10 +1,57 @@
-import { Check, ClipboardCopy, PlugZap, RefreshCw, Unplug } from "lucide-react";
+import { Check, CircleX, ClipboardCopy, PlugZap, RefreshCw, Stethoscope, Unplug } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Badge, Button, Field, Input, PageHeader, SectionTitle, Switch } from "../components/ui";
 import { rpc } from "../lib/api";
 import { useApp } from "../lib/app";
 import { useLive } from "../lib/hooks";
 import { cn, timeAgo } from "../lib/utils";
+
+const CLIENT_STATE: Record<string, { label: string; tone: "ok" | "neutral" | "warn" | "danger" | "accent" }> = {
+  connected: { label: "Connected", tone: "ok" },
+  not_configured: { label: "Not configured", tone: "neutral" },
+  configured: { label: "Configuration detected", tone: "accent" },
+  restart_required: { label: "Restart required", tone: "warn" },
+  test_failed: { label: "Connection test failed", tone: "danger" },
+};
+
+function Diagnostics() {
+  const [r, setR] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    try {
+      setR(await rpc("connections.diagnostics"));
+    } catch (e) {
+      setR({ ok: false, checks: [{ id: "x", label: "Diagnostics", ok: false, detail: (e as Error).message }] });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="panel p-4 xl:col-span-2">
+      <div className="flex items-center gap-2">
+        <Stethoscope className="size-4 text-accent-soft" />
+        <h2 className="text-[14px]">Connection health</h2>
+        {r ? <Badge tone={r.ok ? "ok" : "danger"}>{r.ok ? "Healthy" : "Problems found"}</Badge> : null}
+        <Button size="sm" className="ml-auto" loading={busy} onClick={run}>
+          {r ? "Run again" : "Run diagnostics"}
+        </Button>
+      </div>
+      <p className="mt-1 text-[12px] text-ink-3">Checks configuration separately from real connectivity: it starts MOTH's MCP server like Claude does, lists the tools, runs one, checks the database and job queue, and shows the last real call from a Claude app.</p>
+      {r ? (
+        <ul className="mt-3 divide-y divide-line rounded-[10px] border border-line">
+          {r.checks.map((c: any) => (
+            <li key={c.id} className="flex items-start gap-3 px-3.5 py-2.5 text-[12.5px]">
+              {c.ok ? <Check className="mt-0.5 size-4 shrink-0 text-ok" /> : <CircleX className={cn("mt-0.5 size-4 shrink-0", ["config_code", "last_interaction"].includes(c.id) ? "text-ink-3" : "text-danger")} />}
+              <span className="w-[210px] shrink-0 text-ink">{c.label}</span>
+              <span className="min-w-0 break-words text-ink-2">{c.detail}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
+  );
+}
 
 export function ConnectionsPage() {
   const { toast } = useApp();
@@ -48,6 +95,21 @@ export function ConnectionsPage() {
         }
       />
       <div className="grid gap-6 px-8 pb-10 xl:grid-cols-2">
+        {s?.clients ? (
+          <div className="flex flex-wrap gap-2 xl:col-span-2">
+            {[
+              ["Claude Desktop", s.clients.claude_desktop],
+              ["Claude Code", s.clients.claude_code],
+            ].map(([name, c]: any) => (
+              <div key={name} className="flex items-center gap-2 rounded-[10px] border border-line px-3 py-2 text-[12.5px]">
+                <span className="text-ink">{name}</span>
+                <Badge tone={CLIENT_STATE[c.state]?.tone ?? "neutral"}>{CLIENT_STATE[c.state]?.label ?? c.state}</Badge>
+                {c.last_seen ? <span className="text-ink-3">last seen {timeAgo(c.last_seen)}</span> : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+        <Diagnostics />
         {test ? (
           <div className={cn("panel p-4 xl:col-span-2", test.ok ? "border-[color-mix(in_srgb,var(--color-ok)_40%,transparent)]" : "border-[color-mix(in_srgb,var(--color-danger)_40%,transparent)]")}>
             <p className="text-[13px] text-ink">

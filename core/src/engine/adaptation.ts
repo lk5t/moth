@@ -595,7 +595,7 @@ export class Adaptation {
     const rows = this.db.all<Row>(
       `SELECT m.* FROM memories m WHERE m.user_id = ? AND m.status = 'active' AND m.scope <> 'private'
          AND m.memory_type IN ('research','lesson','procedural')
-         AND COALESCE(m.project_id,'') <> ? AND m.confidence >= 0.3 LIMIT 3000`,
+         AND COALESCE(m.project_id,'') <> ? AND m.confidence >= 0.4 LIMIT 3000`,
       [this.store.userId, projectId],
     );
     const projNames = new Map(this.store.listProjects(true).map((x) => [x.id, x.name]));

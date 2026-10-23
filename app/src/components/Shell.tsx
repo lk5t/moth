@@ -1,26 +1,39 @@
-import { Activity, Brain, Cable, Clock3, Copy, Cpu, FolderKanban, LayoutDashboard, Library, Minus, PanelLeftClose, PanelLeftOpen, Search, Settings, Sparkles, Square, X } from "lucide-react";
+import { Activity, BookOpenCheck, Brain, Cable, ChevronRight, CircleHelp, Clock3, Copy, Cpu, FolderKanban, Inbox, LayoutDashboard, Library, Minus, Moon, PanelLeftClose, PanelLeftOpen, Search, Settings, ShieldOff, Square, UserRound, X, Zap } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState, type ReactNode } from "react";
 import { isTauri, onConnection } from "../lib/api";
 import { useApp, type Page } from "../lib/app";
 import { useLive } from "../lib/hooks";
-import { isMaximized, windowAction } from "../lib/tauri";
+import { isMaximized, openQuickCapture, windowAction } from "../lib/tauri";
+import { rpc } from "../lib/api";
 import { cn } from "../lib/utils";
 import { Kbd } from "./ui";
 import { MothMark } from "./MothLogo";
 
-export const NAV: { page: Page; label: string; icon: ReactNode; key: string }[] = [
+type NavItem = { page: Page; label: string; icon: ReactNode; key: string };
+
+/** Main destinations (Ctrl+1…9). The Mind stays one of the central experiences. */
+export const NAV: NavItem[] = [
   { page: "overview", label: "Overview", icon: <LayoutDashboard />, key: "1" },
   { page: "mind", label: "The Mind", icon: <Brain />, key: "2" },
   { page: "memories", label: "Memories", icon: <Library />, key: "3" },
   { page: "projects", label: "Projects", icon: <FolderKanban />, key: "4" },
-  { page: "metamorphosis", label: "Metamorphosis", icon: <Sparkles />, key: "5" },
-  { page: "cortex", label: "Cortex", icon: <Cpu />, key: "6" },
-  { page: "timeline", label: "Timeline", icon: <Clock3 />, key: "7" },
-  { page: "activity", label: "Activity", icon: <Activity />, key: "8" },
-  { page: "connections", label: "Connections", icon: <Cable />, key: "9" },
+  { page: "cortex", label: "Cortex", icon: <Cpu />, key: "5" },
+  { page: "inbox", label: "Review Queue", icon: <Inbox />, key: "6" },
+  { page: "adaptation", label: "About Me", icon: <UserRound />, key: "7" },
+  { page: "research", label: "Research Library", icon: <BookOpenCheck />, key: "8" },
+  { page: "timeline", label: "Timeline", icon: <Clock3 />, key: "9" },
+];
+const SYSTEM: NavItem[] = [
+  { page: "connections", label: "Connections", icon: <Cable />, key: "" },
   { page: "settings", label: "Settings", icon: <Settings />, key: "," },
 ];
+const MORE: NavItem[] = [
+  { page: "metamorphosis", label: "Sleep Cycle", icon: <Moon />, key: "" },
+  { page: "activity", label: "Activity log", icon: <Activity />, key: "" },
+  { page: "guide", label: "Quick Guide", icon: <CircleHelp />, key: "" },
+];
+export const ALL_PAGES: NavItem[] = [...NAV, ...SYSTEM, ...MORE];
 
 export function TitleBar() {
   const { setPaletteOpen } = useApp();
@@ -82,43 +95,86 @@ function WinBtn({ children, onClick, label, danger }: { children: ReactNode; onC
 }
 
 export function Sidebar() {
-  const { page, go, sidebarCollapsed: collapsed, setSidebarCollapsed } = useApp();
+  const { page, go, sidebarCollapsed: collapsed, setSidebarCollapsed, toast } = useApp();
   const { data: stats } = useLive<any>("meta.stats", {}, { entities: ["memory", "relationship", "project"] });
   const { data: conn } = useLive<any>("connections.status", {}, { entities: ["activity"] });
-  const { data: reviews } = useLive<any[]>("cortex.reviews", {}, { entities: ["review"] });
+  const { data: counts } = useLive<any>("inbox.counts", {}, { entities: ["review" as any] });
+  const { data: sys, reload: reloadSys } = useLive<any>("system.state", {}, { entities: ["settings" as any] });
+  const [more, setMore] = useState(() => MORE.some((m) => m.page === page));
+  const pending = Number(counts?.pending ?? 0);
+  const item = (n: NavItem) => (
+    <button
+      key={n.page}
+      onClick={() => go(n.page)}
+      title={collapsed ? `${n.label}${n.key ? ` (Ctrl+${n.key})` : ""}` : undefined}
+      aria-current={page === n.page ? "page" : undefined}
+      className={cn(
+        "group relative flex h-8 items-center gap-3 rounded-[8px] px-2.5 text-[13px] transition-colors [&_svg]:size-[17px] [&_svg]:shrink-0",
+        page === n.page ? "bg-surface-2 text-ink" : "text-ink-2 hover:bg-surface hover:text-ink",
+      )}
+    >
+      {page === n.page ? <span className="absolute left-0 top-2 h-4 w-[2px] rounded-full bg-accent" /> : null}
+      <span className={cn("relative", page === n.page ? "text-accent-soft" : "")}>
+        {n.icon}
+        {collapsed && n.page === "inbox" && pending ? <span className="absolute -right-1 -top-1 size-2 rounded-full bg-accent" /> : null}
+      </span>
+      <AnimatePresence initial={false}>
+        {!collapsed ? (
+          <motion.span initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex flex-1 items-center truncate text-left">
+            {n.label}
+            {n.page === "inbox" && pending ? <span className="ml-auto rounded-full bg-[color-mix(in_srgb,var(--color-accent)_22%,transparent)] px-1.5 text-[11px] text-accent-soft" title="Waiting for your decision">{pending}</span> : null}
+          </motion.span>
+        ) : null}
+      </AnimatePresence>
+    </button>
+  );
+  const section = (label: string) => (!collapsed ? <div className="mb-1 mt-3 px-2.5 text-[10.5px] uppercase tracking-[0.14em] text-ink-3">{label}</div> : <div className="mx-2.5 my-2 h-px bg-line" />);
+  const toggle = async (what: "privacy" | "learning") => {
+    try {
+      if (what === "privacy") await rpc("privacy.set", { on: !sys?.privacy });
+      else await rpc("automation.pause", { paused: !sys?.learning_paused });
+      void reloadSys();
+    } catch (e) {
+      toast({ kind: "error", text: (e as Error).message });
+    }
+  };
   return (
     <motion.nav
       animate={{ width: collapsed ? 56 : 216 }}
       transition={{ duration: 0.2, ease: [0.2, 0.8, 0.2, 1] }}
-      className="flex shrink-0 flex-col border-r border-line bg-sidebar py-3"
+      className="flex shrink-0 flex-col overflow-y-auto border-r border-line bg-sidebar py-3"
       aria-label="Main"
     >
       <div className="flex flex-col gap-0.5 px-2">
-        {NAV.map((n) => (
-          <button
-            key={n.page}
-            onClick={() => go(n.page)}
-            title={collapsed ? `${n.label} (Ctrl+${n.key})` : undefined}
-            aria-current={page === n.page ? "page" : undefined}
-            className={cn(
-              "group relative flex h-8 items-center gap-3 rounded-[8px] px-2.5 text-[13px] transition-colors [&_svg]:size-[17px] [&_svg]:shrink-0",
-              page === n.page ? "bg-surface-2 text-ink" : "text-ink-2 hover:bg-surface hover:text-ink",
-            )}
-          >
-            {page === n.page ? <span className="absolute left-0 top-2 h-4 w-[2px] rounded-full bg-accent" /> : null}
-            <span className={page === n.page ? "text-accent-soft" : ""}>{n.icon}</span>
-            <AnimatePresence initial={false}>
-              {!collapsed ? (
-                <motion.span initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex flex-1 items-center truncate text-left">
-                  {n.label}
-                  {n.page === "cortex" && reviews?.length ? <span className="ml-auto rounded-full bg-[color-mix(in_srgb,var(--color-accent)_22%,transparent)] px-1.5 text-[11px] text-accent-soft" title="Waiting for your approval">{reviews.length}</span> : null}
-                </motion.span>
-              ) : null}
-            </AnimatePresence>
+        {NAV.slice(0, 5).map(item)}
+        {section("Knowledge")}
+        {NAV.slice(5).map(item)}
+        {section("System")}
+        {SYSTEM.map(item)}
+        {!collapsed ? (
+          <button onClick={() => setMore(!more)} className="mt-1 flex h-7 items-center gap-1.5 rounded-[8px] px-2.5 text-[12px] text-ink-3 hover:text-ink" aria-expanded={more}>
+            <ChevronRight className={cn("size-3.5 transition-transform", more && "rotate-90")} /> More
           </button>
-        ))}
+        ) : null}
+        {more || collapsed ? MORE.map(item) : null}
       </div>
-      <div className="mt-auto px-2">
+      <div className="mt-auto px-2 pt-3">
+        {sys?.privacy || sys?.learning_paused ? (
+          <button
+            onClick={() => void toggle(sys.privacy ? "privacy" : "learning")}
+            title={sys.privacy ? "Privacy Mode is on: MOTH isn't learning automatically and nothing goes to the cloud. Click to turn it off." : "Learning is paused. Click to resume."}
+            className="mb-2 flex w-full items-center gap-2 rounded-[10px] border border-[color-mix(in_srgb,var(--color-warn)_40%,transparent)] px-2.5 py-2 text-left text-[12px] text-warn [&_svg]:size-4 [&_svg]:shrink-0"
+          >
+            <ShieldOff />
+            {!collapsed ? <span>{sys.privacy ? "Privacy Mode on" : "Learning paused"}</span> : null}
+          </button>
+        ) : null}
+        {!collapsed ? (
+          <button onClick={() => void openQuickCapture()} className="mb-2 flex h-8 w-full items-center gap-2 rounded-[8px] border border-line px-2.5 text-[12.5px] text-ink-2 hover:border-line-strong hover:text-ink [&_svg]:size-4">
+            <Zap className="text-accent-soft" /> Quick Capture
+            <span className="ml-auto text-[10.5px] text-ink-3">Ctrl Alt M</span>
+          </button>
+        ) : null}
         {!collapsed && stats ? (
           <div className="mb-3 rounded-[10px] border border-line px-3 py-2.5 text-[12px] leading-relaxed text-ink-2">
             <div>
@@ -129,7 +185,7 @@ export function Sidebar() {
             </div>
             <div className="mt-1.5 flex items-center gap-1.5">
               <span className={cn("size-1.5 rounded-full", conn?.claude_connected ? "bg-ok" : "bg-ink-3")} />
-              {conn?.claude_connected ? "Claude connected" : "Claude not connected"}
+              {conn?.claude_connected ? "Claude connected" : conn?.last_success ? "Claude used MOTH earlier" : "Claude not connected"}
             </div>
           </div>
         ) : null}

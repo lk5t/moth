@@ -5,7 +5,7 @@ import { ContextMenu, Input, Select, Slider, Switch, Tabs } from "../components/
 import { GraphCanvas, type GraphHandle, type GraphNodeData, type GraphSettings } from "../graph/GraphCanvas";
 import { onChanges, rpc } from "../lib/api";
 import { useApp } from "../lib/app";
-import { CATEGORY_COLOR, CATEGORY_LABEL, cn, debounce } from "../lib/utils";
+import { CATEGORY_COLOR, CATEGORY_LABEL, MEMORY_TYPE_LABEL, RELATION_LABEL, SOURCE_LABEL, cn, debounce } from "../lib/utils";
 
 export type FullGraphSettings = GraphSettings & { showOrphans: boolean; showArchived: boolean; recentDays: number; categories: string[]; projects: string[]; tags: string[]; localDepth: number };
 
@@ -39,7 +39,14 @@ export function MindPage() {
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [bloom, setBloom] = useState<Map<string, number>>(new Map());
   const [allTags, setAllTags] = useState<{ tag: string; n: number }[]>([]);
+  const [scope, setScope] = useState<string>(params.project ?? "");
   const graph = useRef<GraphHandle>(null);
+  useEffect(() => {
+    if (params.project) {
+      setScope(params.project);
+      setMode("global");
+    }
+  }, [params.project]);
 
   useEffect(() => {
     if (params.focus) {
@@ -51,7 +58,7 @@ export function MindPage() {
   }, [params.focus]);
 
   const filters = settings
-    ? { includeArchived: settings.showArchived, projectIds: settings.projects, categories: settings.categories, tags: settings.tags, recentDays: settings.recentDays, orphans: settings.showOrphans }
+    ? { includeArchived: settings.showArchived, projectIds: scope ? [scope] : settings.projects, categories: settings.categories, tags: settings.tags, recentDays: settings.recentDays, orphans: settings.showOrphans }
     : null;
   const filterKey = JSON.stringify([filters, mode, center, settings?.localDepth]);
 
@@ -167,6 +174,16 @@ export function MindPage() {
             ))}
           </div>
         ) : null}
+        {mode === "global" ? (
+          <Select value={scope} onChange={(e) => setScope(e.target.value)} aria-label="Show" className="h-8 bg-[#161616]/90">
+            <option value="">All memories</option>
+            {(data?.projects ?? []).map((p: any) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </Select>
+        ) : null}
         <div className="relative">
           <Search className="pointer-events-none absolute left-2.5 top-2 size-4 text-ink-3" />
           <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Highlight in graph" className="h-8 w-[220px] bg-[#161616]/90 pl-8" aria-label="Highlight memories" />
@@ -196,15 +213,22 @@ export function MindPage() {
         <AnimatePresence>{panel ? <SettingsPanel s={settings} update={update} projects={data?.projects ?? []} tags={allTags} onClose={() => setPanel(false)} /> : null}</AnimatePresence>
       </div>
 
-      <div className="pointer-events-none absolute bottom-4 left-4 text-[12px] text-ink-3">
+      <div className="pointer-events-none absolute bottom-4 left-4 max-w-[360px] text-[12px] text-ink-3">
         {hover ? (
-          <span className="text-ink-2">
-            {hover.title} <span className="text-ink-3">· {CATEGORY_LABEL[hover.category]} · {hover.degree} connections</span>
-          </span>
-        ) : (
+          <div className="rounded-[12px] border border-line bg-[#161616]/95 px-3.5 py-2.5 shadow-[0_12px_40px_rgba(0,0,0,0.45)] backdrop-blur">
+            <div className="text-[13px] text-ink">{hover.title}</div>
+            <div className="mt-0.5 text-[11.5px] text-ink-3">
+              {MEMORY_TYPE_LABEL[(hover as any).memory_type] ?? CATEGORY_LABEL[hover.category]} · {hover.degree} connections
+              {(hover as any).confidence != null ? ` · ${Math.round((hover as any).confidence * 100)}% confidence` : ""}
+            </div>
+            {(hover as any).summary ? <p className="mt-1 line-clamp-3 text-[12px] leading-snug text-ink-2">{(hover as any).summary}</p> : null}
+          </div>
+        ) : selected && node(selected) ? null : (
           counts
         )}
       </div>
+
+      {selected && node(selected) && !hover ? <Spotlight node={node(selected)!} data={data!} onGo={(id) => (select(id), graph.current?.focus(id))} onLocal={(id) => (setCenter(id), setMode("local"))} /> : null}
 
       <ContextMenu
         at={menu}
@@ -371,5 +395,40 @@ function Chip({ on, onClick, children, dot }: { on: boolean; onClick: () => void
       {dot ? <span className="size-1.5 rounded-full" style={{ background: dot }} /> : null}
       {children}
     </button>
+  );
+}
+
+/** Memory Spotlight: the selected memory, how sure MOTH is about it, and its direct connections to walk through. */
+function Spotlight({ node, data, onGo, onLocal }: { node: GraphNodeData; data: { nodes: GraphNodeData[]; links: any[] }; onGo: (id: string) => void; onLocal: (id: string) => void }) {
+  const n = node as any;
+  const byId = new Map(data.nodes.map((x) => [x.id, x]));
+  const rels = data.links
+    .filter((l) => l.source_id === node.id || l.target_id === node.id)
+    .map((l) => ({ l, other: byId.get(l.source_id === node.id ? l.target_id : l.source_id), out: l.source_id === node.id }))
+    .filter((x) => x.other)
+    .slice(0, 12);
+  return (
+    <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="absolute bottom-4 left-4 w-[340px] rounded-[14px] border border-[color-mix(in_srgb,var(--color-accent)_35%,transparent)] bg-[#161616]/95 p-3.5 shadow-[0_16px_50px_rgba(0,0,0,0.5)] backdrop-blur">
+      <div className="text-[11px] uppercase tracking-[0.14em] text-accent-soft">Spotlight</div>
+      <div className="mt-1 text-[14px] leading-snug text-ink">{node.title}</div>
+      <div className="mt-0.5 text-[11.5px] text-ink-3">
+        {MEMORY_TYPE_LABEL[n.memory_type] ?? CATEGORY_LABEL[node.category]} · from {SOURCE_LABEL[n.source] ?? n.source ?? "unknown"} · {n.confidence != null ? `${Math.round(n.confidence * 100)}% confidence` : ""}
+      </div>
+      {n.summary ? <p className="mt-1.5 line-clamp-3 text-[12px] leading-snug text-ink-2">{n.summary}</p> : null}
+      <div className="mt-2.5 text-[11.5px] text-ink-3">{rels.length ? `${rels.length} direct connection${rels.length === 1 ? "" : "s"}` : "No connections in this view"}</div>
+      <ul className="mt-1 max-h-[180px] space-y-0.5 overflow-y-auto">
+        {rels.map(({ l, other, out }) => (
+          <li key={l.id}>
+            <button onClick={() => onGo(other!.id)} className="flex w-full items-center gap-2 rounded-[7px] px-1.5 py-1 text-left text-[12px] hover:bg-surface-2">
+              <span className="shrink-0 text-ink-3">{out ? RELATION_LABEL[l.type] ?? l.type : `${RELATION_LABEL[l.type] ?? l.type} ←`}</span>
+              <span className="truncate text-ink">{other!.title}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      <button className="mt-2 text-[12px] text-accent hover:text-accent-soft" onClick={() => onLocal(node.id)}>
+        Explore its neighbourhood
+      </button>
+    </motion.div>
   );
 }

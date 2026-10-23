@@ -494,6 +494,14 @@ CREATE TRIGGER trg_review_defer AFTER UPDATE OF deferred_until ON review_queue B
   INSERT INTO db_changes(entity, entity_id, op) VALUES ('review', CAST(NEW.id AS TEXT), 'update');
 END;
 
+-- Settings changes reach every window (e.g. Privacy Mode toggled from the tray). Timestamps that change often are skipped.
+CREATE TRIGGER trg_settings_ins AFTER INSERT ON settings WHEN NEW.key NOT IN ('inbox.lastScan','sleep.lastRun','backup.lastOk','vault.lastSync') BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('settings', NEW.key, 'update');
+END;
+CREATE TRIGGER trg_settings_upd AFTER UPDATE ON settings WHEN NEW.key NOT IN ('inbox.lastScan','sleep.lastRun','backup.lastOk','vault.lastSync') AND OLD.value IS NOT NEW.value BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('settings', NEW.key, 'update');
+END;
+
 -- Files picked up from the Claude Inbox folder (content hash prevents duplicates).
 CREATE TABLE inbox_files (
   hash TEXT PRIMARY KEY,

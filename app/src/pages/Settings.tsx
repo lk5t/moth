@@ -1,15 +1,16 @@
-import { Download, FolderInput, FolderOpen, LogIn, LogOut, RotateCcw, ShieldCheck, Trash2, Upload } from "lucide-react";
+import { CircleHelp, DatabaseBackup, Download, FileInput, FolderInput, FolderOpen, LogIn, LogOut, Moon, RotateCcw, Search, ShieldCheck, ShieldOff, Trash2, Upload } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { Badge, Button, Dialog, Field, Input, PageHeader, Select, Slider, Switch } from "../components/ui";
 import { isTauri, rpc } from "../lib/api";
 import { useApp } from "../lib/app";
 import { useLive } from "../lib/hooks";
-import { getAutostart, keyringGet, keyringSet, openExternal, pickFolder, revealPath, saveSecret, setAutostart, setKeepInTray, shellInfo } from "../lib/tauri";
+import { getAutostart, keyringGet, keyringSet, openExternal, pickFiles, pickFolder, revealPath, saveSecret, setAutostart, setCaptureShortcut, setKeepInTray, shellInfo } from "../lib/tauri";
 import { cn, timeAgo } from "../lib/utils";
 import { useGraphSettings } from "./Mind";
 
 const SECTIONS = [
   ["general", "General"],
+  ["background", "Privacy, resources & Sleep Cycle"],
   ["automation", "Memory automation"],
   ["ai", "AI providers"],
   ["privacy", "Privacy and permissions"],
@@ -19,10 +20,10 @@ const SECTIONS = [
 ] as const;
 type Section = (typeof SECTIONS)[number][0];
 
-export function SettingsPage() {
+export function SettingsPage({ onRestartFirstFlight }: { onRestartFirstFlight?: () => void } = {}) {
   const { params } = useApp();
   const [section, setSection] = useState<Section>((params.section as Section) ?? "general");
-  const { data, reload } = useLive<any>("settings.get", {}, { entities: [] });
+  const { data, reload } = useLive<any>("settings.get", {}, { entities: ["settings" as any] });
   const { toast } = useApp();
   const s = data?.settings;
   const set = async (key: string, value: unknown, msg?: string) => {
@@ -49,7 +50,9 @@ export function SettingsPage() {
           {!s ? (
             <div className="skeleton h-40 w-full" />
           ) : section === "general" ? (
-            <General s={s} set={set} />
+            <General s={s} set={set} onRestartFirstFlight={onRestartFirstFlight} />
+          ) : section === "background" ? (
+            <Background s={s} set={set} />
           ) : section === "automation" ? (
             <Automation s={s} set={set} />
           ) : section === "ai" ? (
@@ -93,13 +96,49 @@ function Line({ label, hint, children }: { label: string; hint?: ReactNode; chil
   );
 }
 
-function General({ s, set }: SP) {
-  const { toast } = useApp();
+function General({ s, set, onRestartFirstFlight }: SP & { onRestartFirstFlight?: () => void }) {
+  const { toast, go } = useApp();
   const [autostart, setAuto] = useState(false);
   const [update, setUpdate] = useState<any>(null);
+  const [shortcut, setShortcut] = useState<string>(s["quickCapture.shortcut"]);
   useEffect(() => void getAutostart().then(setAuto), []);
+  const applyShortcut = async (enabled: boolean, value: string) => {
+    const err = await setCaptureShortcut(enabled ? value.trim() || null : null);
+    if (err) return toast({ kind: "error", text: err });
+    await set("quickCapture.enabled", enabled);
+    await set("quickCapture.shortcut", value.trim(), enabled ? `Quick Capture: ${value.trim()}` : "Quick Capture shortcut off");
+  };
   return (
     <>
+      <Block title="First Flight & help">
+        <Line label="Quick Guide" hint="How MOTH works, what's automatic and what isn't.">
+          <Button size="sm" onClick={() => go("guide")}>
+            <CircleHelp /> Open
+          </Button>
+        </Line>
+        <Line label="Restart First Flight" hint="Walk through the setup again. Your memories and settings stay as they are.">
+          <Button
+            size="sm"
+            onClick={async () => {
+              await rpc("firstFlight.restart");
+              onRestartFirstFlight?.();
+            }}
+          >
+            <RotateCcw /> Restart
+          </Button>
+        </Line>
+      </Block>
+      <Block title="Quick Capture" description="A small window to save a thought from anywhere while MOTH runs. The memory is saved first; Cortex can organise it afterwards.">
+        <Line label="Global shortcut" hint="For example Ctrl+Alt+M or Ctrl+Shift+Space. If another app already uses it, MOTH tells you.">
+          <div className="flex items-center gap-2">
+            <Input className="w-[150px]" value={shortcut} onChange={(e) => setShortcut(e.target.value)} aria-label="Shortcut" />
+            <Button size="sm" onClick={() => void applyShortcut(true, shortcut)} disabled={!isTauri()}>
+              Apply
+            </Button>
+            <Switch checked={s["quickCapture.enabled"]} disabled={!isTauri()} onChange={(v) => void applyShortcut(v, shortcut)} label="Quick Capture shortcut" />
+          </div>
+        </Line>
+      </Block>
       <Block title="Desktop">
         <Line label="Start MOTH when Windows starts" hint="MOTH starts minimised in the tray so the memory engine is always ready.">
           <Switch
@@ -119,8 +158,12 @@ function General({ s, set }: SP) {
         <Line label="Closing the window keeps MOTH running in the tray" hint="So background learning continues. Quit from the tray icon.">
           <Switch checked={s["app.closeToTray"]} onChange={(v) => (void setKeepInTray(v), set("app.closeToTray", v))} label="Close to tray" />
         </Line>
-        <Line label="Notifications" hint="A quiet notification when Claude teaches MOTH something while the window is hidden.">
-          <Switch checked={s["notifications.enabled"]} onChange={(v) => set("notifications.enabled", v)} label="Notifications" />
+        <Line label="Notifications" hint="Important: model installed, conflicts, review queue piling up, connection or backup failures. All: also imports and finished Sleep Cycles.">
+          <Select value={s["notifications.level"]} onChange={(e) => set("notifications.level", e.target.value)} aria-label="Notifications">
+            <option value="important">Important only</option>
+            <option value="all">All supported</option>
+            <option value="silent">Silent</option>
+          </Select>
         </Line>
         <Line label="Reduce motion" hint="Turns off graph animation and transitions.">
           <Switch checked={s["appearance.reduceMotion"]} onChange={(v) => (document.documentElement.classList.toggle("reduce-motion", v), set("appearance.reduceMotion", v))} label="Reduce motion" />
@@ -138,6 +181,63 @@ function General({ s, set }: SP) {
               Check now
             </Button>
           </div>
+        </Line>
+      </Block>
+    </>
+  );
+}
+
+function Background({ s, set }: SP) {
+  const { toast } = useApp();
+  const { data: sleep, reload } = useLive<any>("sleep.status", {}, { entities: ["activity", "settings" as any] });
+  const toggle = async (fn: () => Promise<unknown>, msg: string) => {
+    try {
+      await fn();
+      toast({ kind: "ok", text: msg });
+    } catch (e) {
+      toast({ kind: "error", text: (e as Error).message });
+    }
+  };
+  return (
+    <>
+      <Block title="Privacy Mode" description="Pausing learning keeps MOTH running and readable by Claude but stops automatic learning. Privacy Mode goes further: it also blocks research capture, the Claude Inbox and any cloud processing. Neither switches back on by itself. Quitting MOTH (tray menu) stops everything.">
+        <Line label="Privacy Mode" hint="Also available in the tray menu. Your existing memories stay available to view.">
+          <Switch checked={s["privacy.mode"]} onChange={(v) => void toggle(() => rpc("privacy.set", { on: v }), v ? "Privacy Mode on" : "Privacy Mode off")} label="Privacy Mode" />
+        </Line>
+        <Line label="Pause learning" hint="Claude can still read memories; nothing new is learned automatically.">
+          <Switch checked={s["automation.paused"]} onChange={(v) => void toggle(() => rpc("automation.pause", { paused: v }), v ? "Learning paused" : "Learning resumed")} label="Pause learning" />
+        </Line>
+      </Block>
+      <Block title="Resource profile" description="How hard MOTH works in the background. MOTH never promises a fixed CPU or memory use; these change when work runs and how long the model stays loaded.">
+        <Line label="Profile" hint={s["resources.profile"] === "eco" ? "Minimal background work, unloads the model after 2 idle minutes, defers maintenance (especially on battery)." : s["resources.profile"] === "performance" ? "Processes promptly and keeps the model loaded for at least 15 idle minutes." : "Processes memory jobs, defers heavy maintenance while the PC is busy. Recommended."}>
+          <Select value={s["resources.profile"]} onChange={(e) => set("resources.profile", e.target.value, "Resource profile changed")} aria-label="Resource profile">
+            <option value="eco">Eco</option>
+            <option value="balanced">Balanced</option>
+            <option value="performance">Performance</option>
+          </Select>
+        </Line>
+      </Block>
+      <Block title="Sleep Cycle" description="MOTH's background reflection: merging duplicates, flagging contradictions, connecting related memories and refreshing summaries. It waits while the PC is busy, on battery saver, when learning is paused or in Privacy Mode.">
+        <Line label="When to run" hint={s["sleep.mode"] === "idle" ? (sleep?.idle_known ? "When you haven't used the PC for a while." : "Idle time isn't reported on this system, so it runs on the regular interval.") : s["sleep.mode"] === "after_session" ? "After a Claude work session (moth_end_task) has finished." : "Only when you start it."}>
+          <Select value={s["sleep.mode"]} onChange={(e) => set("sleep.mode", e.target.value)} aria-label="Sleep Cycle mode">
+            <option value="idle">When the PC is idle</option>
+            <option value="after_session">After a Claude work session</option>
+            <option value="manual">Manual only</option>
+          </Select>
+        </Line>
+        {s["sleep.mode"] === "idle" ? (
+          <Line label="Idle for at least">
+            <Select value={String(s["sleep.idleMinutes"])} onChange={(e) => set("sleep.idleMinutes", Number(e.target.value))}>
+              <option value="5">5 minutes</option>
+              <option value="10">10 minutes</option>
+              <option value="30">30 minutes</option>
+            </Select>
+          </Line>
+        ) : null}
+        <Line label="Run now" hint={sleep ? `${sleep.last_run ? `Last run ${timeAgo(sleep.last_run)}.` : "Hasn't run yet."}${sleep.defer_reason ? ` Waiting: ${sleep.defer_reason}.` : ""}` : undefined}>
+          <Button size="sm" onClick={() => void toggle(() => rpc("sleep.run").then(reload), "Sleep Cycle started")}>
+            <Moon /> Run Sleep Cycle
+          </Button>
         </Line>
       </Block>
     </>
@@ -422,7 +522,10 @@ function GraphPhysics() {
 
 function Data() {
   const { toast } = useApp();
-  const { data: backups, reload } = useLive<any[]>("backup.list", {}, { entities: [] });
+  const { data: backups, reload } = useLive<any[]>("backup.list", {}, { entities: ["activity"] });
+  const { data: bst, reload: reloadBst } = useLive<any>("backup.status", {}, { entities: ["settings" as any, "activity"] });
+  const { data: inbox, reload: reloadInbox } = useLive<any>("folders.status", {}, { entities: ["settings" as any, "memory"] });
+  const [inspect, setInspect] = useState<any>(null);
   const { data: info } = useLive<any>("app.info", {}, { entities: [] });
   const { data: demo, reload: reloadDemo } = useLive<any>("demo.present", {}, { entities: ["memory"] });
   const [folder, setFolder] = useState("");
@@ -437,6 +540,8 @@ function Data() {
       toast({ kind: "ok", text: ok(r) });
       void reload();
       void reloadDemo();
+      void reloadBst();
+      void reloadInbox();
       return r;
     } catch (e) {
       toast({ kind: "error", text: (e as Error).message });
@@ -459,6 +564,61 @@ function Data() {
           </Button>
         </div>
       </Block>
+      <Block title="Import files" description="Markdown, plain text or JSON (a list of memories, a MOTH export, or research/lesson/preference objects). Identical content isn't imported twice.">
+        <Line label="Choose files">
+          <Button size="sm" disabled={!isTauri()} loading={busy === "files"} onClick={async () => {
+            const files = await pickFiles();
+            if (files.length) await run("files", () => rpc("import.files", { files }), (r) => `Imported ${r.imported} memories from ${r.files} file(s)${r.notes?.length ? ` (${r.notes.length} note${r.notes.length === 1 ? "" : "s"})` : ""}`);
+          }}>
+            <FileInput /> Import files
+          </Button>
+        </Line>
+      </Block>
+      <Block title="Claude Inbox folder" description="Any Claude (also chats in the browser or the cloud) can drop .md, .txt or .json files here. MOTH imports them while it runs and moves them to an Imported subfolder; nothing is deleted. Paused in Privacy Mode.">
+        <Line label={inbox?.enabled ? "Watching" : "Off"} hint={inbox?.folder ? <span className="selectable break-all">{inbox.folder}{inbox.exists ? "" : " (folder not found)"}{inbox.last_scan ? ` · checked ${timeAgo(inbox.last_scan)}` : ""}</span> : "Choose a folder, for example inside your Obsidian vault."}>
+          <div className="flex gap-2">
+            <Button size="sm" variant="ghost" disabled={!isTauri()} onClick={async () => {
+              const f = await pickFolder();
+              if (f) await run("inbox", () => rpc("folders.setupInbox", { folder: f }), () => "Claude Inbox folder set");
+            }}>
+              <FolderOpen /> Choose
+            </Button>
+            {inbox?.folder ? (
+              <>
+                <Button size="sm" loading={busy === "scan"} onClick={() => run("scan", () => rpc("folders.scanInbox"), (r) => (r.skipped ? r.skipped : `Imported ${r.imported} memories from ${r.files} file(s)`))}>
+                  <Search /> Check now
+                </Button>
+                <Switch checked={!!inbox?.enabled} onChange={(v) => run("inbox-toggle", () => rpc("settings.set", { key: "inbox.enabled", value: v }), () => (v ? "Claude Inbox on" : "Claude Inbox off"))} label="Claude Inbox" />
+              </>
+            ) : null}
+          </div>
+        </Line>
+        {inbox?.recent?.length ? (
+          <div className="px-4 py-3">
+            <div className="mb-1 text-[12px] text-ink-3">Recently processed</div>
+            <ul className="space-y-0.5 text-[12px]">
+              {inbox.recent.slice(0, 6).map((f: any) => (
+                <li key={f.hash} className="flex gap-2">
+                  <span className={cn("shrink-0", f.status === "failed" ? "text-danger" : "text-ok")}>{f.status}</span>
+                  <span className="truncate text-ink-2" title={f.detail}>{f.name}</span>
+                  <span className="ml-auto shrink-0 text-ink-3">{timeAgo(f.created_at)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        <Line label="Keep an Obsidian vault in sync" hint={inbox?.vault?.folder ? `${inbox.vault.folder}${inbox.vault.last_sync ? ` · synced ${timeAgo(inbox.vault.last_sync)}` : ""}` : "Re-imports the vault every few minutes so edits show up in MOTH (updates notes, never duplicates)."}>
+          <div className="flex gap-2">
+            <Button size="sm" variant="ghost" disabled={!isTauri()} onClick={async () => {
+              const f = await pickFolder();
+              if (f) await run("vault", async () => (await rpc("settings.set", { key: "vault.folder", value: f }), await rpc("settings.set", { key: "vault.sync", value: true }), rpc("folders.syncVault")), (r) => `Vault synced: ${r.imported ?? 0} new, ${r.updated ?? 0} updated`);
+            }}>
+              <FolderOpen /> Choose vault
+            </Button>
+            {inbox?.vault?.folder ? <Switch checked={!!inbox.vault.enabled} onChange={(v) => run("vault-toggle", () => rpc("settings.set", { key: "vault.sync", value: v }), () => (v ? "Vault sync on" : "Vault sync off"))} label="Vault sync" /> : null}
+          </div>
+        </Line>
+      </Block>
       <Block title="Export">
         <Line label="Everything as JSON" hint="Memories, versions, connections, projects and history.">
           <Button size="sm" loading={busy === "json"} onClick={() => run("json", () => rpc("export.json"), (r) => `Exported to ${r.path}`).then((r) => r && revealPath(r.path))}>
@@ -471,15 +631,52 @@ function Data() {
           </Button>
         </Line>
       </Block>
-      <Block title="Backups" description="MOTH backs up automatically every day and keeps the last ten. If the database is ever damaged, it restores the newest healthy backup on start.">
+      <Block title="Backups" description="A consistent snapshot of the whole brain (memories, connections, projects, preferences, sources, version history and settings), checked for integrity after it's written. If the database is ever damaged, MOTH restores the newest healthy backup on start.">
+        <Line label="Automatic backups" hint={bst ? `${bst.last_ok ? `Last good backup ${timeAgo(bst.last_ok)}.` : "No backup yet."}${bst.last_error ? ` Last problem: ${bst.last_error}` : ""}` : undefined}>
+          <div className="flex items-center gap-2">
+            <Select value={String(bst?.interval_hours ?? 24)} onChange={(e) => run("bint", () => rpc("settings.set", { key: "backup.intervalHours", value: Number(e.target.value) }), () => "Backup schedule saved")} aria-label="How often">
+              <option value="6">Every 6 hours</option>
+              <option value="12">Every 12 hours</option>
+              <option value="24">Daily</option>
+              <option value="168">Weekly</option>
+            </Select>
+            <Select value={String(bst?.keep ?? 7)} onChange={(e) => run("bkeep", () => rpc("settings.set", { key: "backup.keep", value: Number(e.target.value) }), () => "Retention saved")} aria-label="Keep">
+              {[3, 5, 7, 14, 30].map((n) => (
+                <option key={n} value={n}>
+                  Keep {n}
+                </option>
+              ))}
+            </Select>
+            <Switch checked={!!bst?.auto} onChange={(v) => run("bauto", () => rpc("settings.set", { key: "backup.auto", value: v }), () => (v ? "Automatic backups on" : "Automatic backups off"))} label="Automatic backups" />
+          </div>
+        </Line>
+        <Line label="Backup folder" hint={<span className="selectable break-all">{bst?.folder}</span>}>
+          <div className="flex gap-2">
+            <Button size="sm" variant="ghost" disabled={!isTauri()} onClick={async () => {
+              const f = await pickFolder();
+              if (f) await run("bloc", () => rpc("settings.set", { key: "backup.location", value: f }), () => "Backups will be saved there");
+            }}>
+              <FolderOpen /> Change
+            </Button>
+            {bst && bst.folder !== bst.default_folder ? (
+              <Button size="sm" variant="ghost" onClick={() => run("bloc", () => rpc("settings.set", { key: "backup.location", value: "" }), () => "Back to the default folder")}>
+                Default
+              </Button>
+            ) : null}
+          </div>
+        </Line>
         <Line label="Back up now">
-          <Button size="sm" loading={busy === "backup"} onClick={() => run("backup", () => rpc("backup.create"), (r) => `Saved ${r.name}`)}>
-            Back up now
+          <Button size="sm" loading={busy === "backup"} onClick={() => run("backup", () => rpc("backup.create"), (r) => `Saved ${r.name} (integrity ${r.integrity})`)}>
+            <DatabaseBackup /> Back up now
           </Button>
         </Line>
-        {(backups ?? []).slice(0, 8).map((b) => (
-          <Line key={b.name} label={b.name.replace(".db", "")} hint={`${(b.bytes / 1024).toFixed(0)} KB, ${timeAgo(b.created_at)}`}>
-            <Button size="sm" variant="ghost" onClick={() => setRestore(b.name)}>
+        {(backups ?? []).slice(0, 10).map((b) => (
+          <Line key={`${b.folder}-${b.name}`} label={b.name.replace(".db", "")} hint={`${(b.bytes / 1024).toFixed(0)} KB, ${timeAgo(b.created_at)}`}>
+            <Button size="sm" variant="ghost" onClick={async () => {
+              setRestore(b.name);
+              setInspect(null);
+              setInspect(await rpc("backup.inspect", { name: b.name }).catch((e) => ({ ok: false, integrity: (e as Error).message })));
+            }}>
               <RotateCcw /> Restore
             </Button>
           </Line>
@@ -524,13 +721,24 @@ function Data() {
             <Button variant="ghost" onClick={() => setRestore(null)}>
               Cancel
             </Button>
-            <Button variant="primary" onClick={() => run("restore", () => rpc("backup.restore", { name: restore }), (r) => (r.restored ? "Restored. Your previous state was backed up first." : "Restore staged; it completes the next time MOTH starts.")).then(() => setRestore(null))}>
+            <Button variant="primary" disabled={!inspect?.ok} onClick={() => run("restore", () => rpc("backup.restore", { name: restore }), (r) => (r.restored ? "Restored. Your previous state was backed up first." : "Restore staged; it completes the next time MOTH starts.")).then(() => setRestore(null))}>
               Restore
             </Button>
           </>
         }
       >
         <p className="text-[13px] leading-relaxed text-ink-2">Your brain goes back to {restore}. MOTH backs up the current state first, so this can be undone by restoring that backup.</p>
+        {inspect ? (
+          inspect.ok ? (
+            <p className="mt-2 text-[12.5px] text-ink-2">
+              This backup passed its integrity check and contains {inspect.memories} active memories, {inspect.relationships} connections, {inspect.projects} projects and {inspect.versions} versions.
+            </p>
+          ) : (
+            <p className="mt-2 text-[12.5px] text-danger">This backup can't be used: {inspect.integrity}</p>
+          )
+        ) : (
+          <p className="mt-2 text-[12.5px] text-ink-3">Checking the backup…</p>
+        )}
       </Dialog>
     </>
   );

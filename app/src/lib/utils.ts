@@ -56,3 +56,42 @@ export function debounce<T extends (...a: any[]) => void>(fn: T, ms: number): T 
     t = setTimeout(() => fn(...a), ms);
   }) as T;
 }
+
+export const MEMORY_TYPE_LABEL: Record<string, string> = {
+  episodic: "Episode",
+  semantic: "Knowledge",
+  procedural: "How-to",
+  project: "Project",
+  preference: "Preference",
+  research: "Research",
+  lesson: "Lesson",
+};
+
+export const SOURCE_LABEL: Record<string, string> = {
+  claude: "Claude",
+  user: "You",
+  moth: "MOTH",
+  cortex: "Cortex",
+  obsidian: "Obsidian",
+  "quick-capture": "Quick Capture",
+  "first-flight": "First Flight",
+  "claude-inbox": "Claude Inbox",
+  "claude-research": "Claude research",
+  "claude-code-prompt": "Claude Code",
+  import: "Import",
+  google_drive: "Google Drive",
+  gmail: "Gmail",
+  google_calendar: "Google Calendar",
+};
+
+export const AREA_LABEL: Record<string, string> = {
+  coding: "Coding style",
+  tools: "Tools & frameworks",
+  ui: "UI & design",
+  workflow: "Workflow",
+  communication: "Communication",
+  requirement: "Requirements",
+  instruction: "Instructions",
+  lesson: "Lessons",
+  other: "Other",
+};

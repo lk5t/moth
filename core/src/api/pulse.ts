@@ -24,6 +24,10 @@ const FEED_KINDS: Record<string, string> = {
   task_ended: "Claude task finished",
   privacy_on: "Privacy Mode on",
   privacy_off: "Privacy Mode off",
+  reflection: "Sleep Cycle reflection",
+  conflict_cleared: "Conflict resolved",
+  restored_version: "Earlier version restored",
+  pinned: "Memory pinned",
 };
 
 export function pulse(brain: Brain): Row {
@@ -37,6 +41,7 @@ export function pulse(brain: Brain): Row {
   const events = brain.store.listEvents({ limit: 40 }).map((e) => ({ id: e.id, at: e.created_at, kind: e.kind, label: FEED_KINDS[e.kind as string] ?? String(e.kind).replace(/_/g, " "), description: e.description, memory_id: e.memory_id, related_memory_id: e.related_memory_id, actor: e.actor, project_id: e.project_id }));
   const system = brain.store
     .listActivity({ limit: 60 })
+    .filter((a) => !String(a.source).startsWith("moth-self-test"))
     .filter((a) => (a.kind === "cortex" && ["load", "unload", "install"].includes(String(a.action))) || a.kind === "mcp_connect" || (a.kind === "mcp_call" && a.status === "error") || a.kind === "sleep" || (a.kind === "system" && a.action === "backup"))
     .slice(0, 20)
     .map((a) => ({

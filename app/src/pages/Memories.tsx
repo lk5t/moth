@@ -1,10 +1,10 @@
-import { FilePlus2, Library, Search } from "lucide-react";
+import { FilePlus2, Library, Pin, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Badge, Button, Empty, Input, PageHeader, Select } from "../components/ui";
 import { rpc } from "../lib/api";
 import { useApp } from "../lib/app";
 import { useLive } from "../lib/hooks";
-import { CATEGORY_COLOR, CATEGORY_LABEL, cn, timeAgo } from "../lib/utils";
+import { CATEGORY_COLOR, CATEGORY_LABEL, MEMORY_TYPE_LABEL, SOURCE_LABEL, cn, timeAgo } from "../lib/utils";
 
 export function MemoriesPage() {
   const { params, select, selected, edit } = useApp();
@@ -15,11 +15,15 @@ export function MemoriesPage() {
   const [status, setStatus] = useState("active");
   const [since, setSince] = useState("");
   const [order, setOrder] = useState("updated");
+  const [mtype, setMtype] = useState("");
+  const [source, setSource] = useState("");
+  const [minConf, setMinConf] = useState("");
+  const [pinned, setPinned] = useState(params.pinned === "1");
   const [results, setResults] = useState<any[] | null>(null);
   const [limit, setLimit] = useState(100);
   const { data: projects } = useLive<any[]>("projects.list", {}, { entities: ["project"] });
   const { data: tags } = useLive<any[]>("tags", {}, { entities: ["memory"] });
-  const filters = { category: category || undefined, project_id: project || undefined, tag: tag || undefined, status, since: since || undefined, order, limit };
+  const filters = { category: category || undefined, project_id: project || undefined, tag: tag || undefined, status, since: since || undefined, order, limit, memory_type: mtype || undefined, source: source || undefined, pinned: pinned || undefined, min_confidence: minConf ? Number(minConf) : undefined };
   const { data: list, loading } = useLive<{ items: any[]; total: number }>("memories.list", filters, { entities: ["memory"] });
 
   useEffect(() => {
@@ -30,10 +34,10 @@ export function MemoriesPage() {
   useEffect(() => {
     if (!query.trim()) return setResults(null);
     const t = setTimeout(() => {
-      void rpc<any[]>("search", { query, filters: { category: category || undefined, project_id: project || undefined, tags: tag ? [tag] : undefined, since: since || undefined, status }, limit: 50 }).then(setResults);
+      void rpc<any[]>("search", { query, filters: { category: category || undefined, project_id: project || undefined, tags: tag ? [tag] : undefined, since: since || undefined, status, memory_type: mtype || undefined, source: source || undefined, pinned, min_confidence: minConf ? Number(minConf) : undefined }, limit: 50 }).then(setResults);
     }, 180);
     return () => clearTimeout(t);
-  }, [query, category, project, tag, since, status]);
+  }, [query, category, project, tag, since, status, mtype, source, pinned, minConf]);
 
   const rows = results ? results.map((r) => ({ ...r.memory, _score: r.score, _why: r.why })) : list?.items ?? [];
   const projectName = (id: string | null) => projects?.find((p) => p.id === id)?.name;
@@ -84,6 +88,31 @@ export function MemoriesPage() {
           <option value={new Date(Date.now() - 7 * 86400000).toISOString()}>Last 7 days</option>
           <option value={new Date(Date.now() - 30 * 86400000).toISOString()}>Last 30 days</option>
         </Select>
+        <Select value={mtype} onChange={(e) => setMtype(e.target.value)} aria-label="Memory type">
+          <option value="">All types</option>
+          {Object.entries(MEMORY_TYPE_LABEL).map(([k, v]) => (
+            <option key={k} value={k}>
+              {v}
+            </option>
+          ))}
+        </Select>
+        <Select value={source} onChange={(e) => setSource(e.target.value)} aria-label="Source">
+          <option value="">Any source</option>
+          {Object.entries(SOURCE_LABEL).map(([k, v]) => (
+            <option key={k} value={k}>
+              {v}
+            </option>
+          ))}
+        </Select>
+        <Select value={minConf} onChange={(e) => setMinConf(e.target.value)} aria-label="Confidence">
+          <option value="">Any confidence</option>
+          <option value="0.5">50%+</option>
+          <option value="0.7">70%+</option>
+          <option value="0.9">90%+</option>
+        </Select>
+        <button onClick={() => setPinned(!pinned)} aria-pressed={pinned} className={cn("flex h-8 items-center gap-1.5 rounded-[var(--radius-md)] border px-2.5 text-[12.5px] [&_svg]:size-3.5", pinned ? "border-accent/60 text-accent-soft" : "border-line text-ink-2 hover:text-ink")}>
+          <Pin /> Pinned
+        </button>
         <Select value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Status">
           <option value="active">Active</option>
           <option value="archived">Archived</option>
@@ -119,11 +148,13 @@ export function MemoriesPage() {
                     {m.task_state === "open" ? <Badge>Open task</Badge> : null}
                     {m.flags?.includes("possible_conflict") ? <Badge tone="warn">Conflict</Badge> : null}
                     {m.is_demo ? <Badge tone="warn">Demo</Badge> : null}
+                    {m.pinned ? <Pin className="size-3.5 shrink-0 text-accent-soft" aria-label="Pinned" /> : null}
                   </span>
                   <span className="mt-0.5 line-clamp-2 block text-[12.5px] leading-snug text-ink-2">{m.summary || m.content}</span>
                   <span className="mt-1 block text-[11.5px] text-ink-3">
-                    {CATEGORY_LABEL[m.category]}
+                    {MEMORY_TYPE_LABEL[m.memory_type] ?? CATEGORY_LABEL[m.category]}
                     {projectName(m.project_id) ? `, ${projectName(m.project_id)}` : ""}
+                    {`, ${SOURCE_LABEL[m.source] ?? m.source}, ${Math.round(m.confidence * 100)}%`}
                     {m._why?.length ? `, ${m._why.join(", ")}` : ""}
                   </span>
                 </span>
