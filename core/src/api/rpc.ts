@@ -10,8 +10,9 @@ import { truncate } from "../engine/text.ts";
 import { CATEGORIES, MothError, type ChangeContext } from "../engine/types.ts";
 import { disconnectIntegration, googleAuthStatus, importFromGoogle, signOut, startGoogleAuth, type GooglePurpose } from "../auth/google.ts";
 import {
-  claudeCodeInstructions, configureClaudeCode, configureClaudeDesktop, connectionStatus, removeClaudeDesktop, selfTest,
+  claudeCodeInstructions, clientStates, configureClaudeCode, configureClaudeDesktop, connectionStatus, diagnostics, removeClaudeDesktop, selfTest,
 } from "../connections.ts";
+import { pulse, timeline } from "./pulse.ts";
 import { VERSION } from "../mcp/server.ts";
 
 export interface Controller {
@@ -114,6 +115,8 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
       if (p.confirm !== true) throw new MothError("invalid_input", "Permanent deletion must be confirmed");
       return b().store.deletePermanently(req(p.id, "id"), user("Deleted permanently by the user"));
     },
+    "memories.pin": (p: { id: string; pinned: boolean }) => b().store.updateMemory(req(p.id, "id"), { pinned: !!p.pinned }, user(p.pinned ? "Pinned" : "Unpinned"), { changeType: p.pinned ? "pinned" : "unpinned" }),
+    "memories.sources": (p: { id: string }) => b().adaptation.sourcesOf(req(p.id, "id")),
     "memories.versions": (p: { id: string }) => b().store.versions(req(p.id, "id")),
     "memories.restoreVersion": (p: { id: string; version: number }) => b().store.restoreVersion(req(p.id, "id"), Number(p.version), user(`Restored version ${p.version}`)),
     "memories.link": (p: any) => b().link(req(p.source_id, "source_id"), req(p.target_id, "target_id"), req(p.type, "type"), req(p.reason, "reason"), user(p.reason)),
@@ -153,7 +156,7 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
     search: async (p: { query: string; filters?: any; limit?: number }) => {
       const br = b();
       const f = p.filters ?? {};
-      const res = await br.search.hybrid(req(p.query, "query"), { project_id: f.project_id, category: f.category, tags: f.tags, since: f.since, until: f.until, related_to: f.related_to, status: f.status ?? "active" }, { limit: p.limit ?? 30, minScore: 0.12 });
+      const res = await br.search.hybrid(req(p.query, "query"), { project_id: f.project_id, category: f.category, tags: f.tags, since: f.since, until: f.until, related_to: f.related_to, status: f.status ?? "active", memory_type: f.memory_type, source: f.source, pinned: !!f.pinned, min_confidence: typeof f.min_confidence === "number" ? f.min_confidence : null }, { limit: p.limit ?? 30, minScore: 0.12 });
       return res.map((r) => ({ memory: { ...r.memory, content: truncate(r.memory.content, 600) }, score: r.score, signals: r.signals, why: r.why }));
     },
     "search.ask": async (p: { query: string }) => {
@@ -216,7 +219,69 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
     "meta.stats": () => b().meta.stats(),
     "meta.growth": (p: { days?: number } = {}) => b().meta.growth(Math.max(7, Math.min(p?.days ?? 30, 365))),
     "meta.reflect": async () => b().meta.reflect(),
-    "automation.pause": (p: { paused: boolean }) => (b().settings.set("automation.paused", !!p.paused), { paused: !!p.paused }),
+    "automation.pause": (p: { paused: boolean }) => b().setLearningPaused(!!p.paused),
+    "privacy.set": (p: { on: boolean }) => b().setPrivacyMode(!!p.on),
+    "system.state": () => ({ privacy: b().privacyMode(), learning_paused: !!b().settings.get("automation.paused"), profile: b().settings.get("resources.profile"), defer_reason: b().deferReason(), system: b().system, cpu: b().cpuLoad() }),
+    "sleep.run": () => ({ job_id: b().jobs.enqueue("sleep_cycle", { manual: true }, { dedupe: "sleep_cycle", priority: 4 }) }),
+    "sleep.status": () => ({ mode: b().settings.get("sleep.mode"), last_run: b().settings.get("sleep.lastRun") || null, due: b().sleepDue(), defer_reason: b().deferReason(), idle_known: b().system.idleSeconds !== null, last: b().store.listActivity({ kind: "sleep", limit: 5 }) }),
+
+    // ---------------------------------------------------------------- v0.2.5: Pulse, Timeline, First Flight, Quick Capture
+    pulse: () => pulse(b()),
+    "timeline.query": (p: any = {}) => timeline(b(), p ?? {}),
+    "firstFlight.get": () => b().settings.get("firstFlight"),
+    "firstFlight.save": (p: { step?: number; skipped?: string[]; completed?: boolean; firstMemoryId?: string }) => {
+      const br = b();
+      const cur = br.settings.get("firstFlight");
+      const next = { ...cur, ...(typeof p.step === "number" ? { step: Math.max(0, Math.min(5, p.step)) } : {}), ...(Array.isArray(p.skipped) ? { skipped: [...new Set([...cur.skipped, ...p.skipped])] } : {}), ...(p.firstMemoryId ? { firstMemoryId: p.firstMemoryId } : {}), startedAt: cur.startedAt || new Date().toISOString() };
+      if (p.completed) {
+        next.completed = true;
+        next.finishedAt = new Date().toISOString();
+        br.settings.set("onboarding.completed", true);
+      }
+      br.settings.set("firstFlight", next);
+      return next;
+    },
+    "firstFlight.restart": () => {
+      const br = b();
+      br.settings.set("firstFlight", { step: 0, completed: false, skipped: [], startedAt: "", finishedAt: "", firstMemoryId: "" });
+      br.settings.set("onboarding.completed", false);
+      return br.settings.get("firstFlight");
+    },
+    "capture.save": (p: { text: string; project?: string; title?: string; analyze?: boolean; source?: string }) => b().quickCapture({ text: req(p.text, "text"), project: p.project || null, title: p.title, analyze: p.analyze !== false, source: p.source === "first-flight" ? "first-flight" : "quick-capture" }),
+
+    // ---------------------------------------------------------------- Memory Inbox (unified review queue)
+    "inbox.list": (p: { status?: string; kind?: string; include_deferred?: boolean } = {}) => b().inbox.list(p ?? {}),
+    "inbox.counts": () => b().inbox.counts(),
+    "inbox.approve": (p: { id: number; content?: string; title?: string }) => b().inbox.approve(Number(p.id), { ...(p.content ? { content: p.content } : {}), ...(p.title ? { title: p.title } : {}) }),
+    "inbox.reject": (p: { id: number; note?: string; verdict?: "incorrect" | "irrelevant" | "keep_separate" }) => b().inbox.reject(Number(p.id), p.note, p.verdict),
+    "inbox.defer": (p: { id: number; hours?: number }) => b().inbox.defer(Number(p.id), Number(p.hours ?? 24)),
+
+    // ---------------------------------------------------------------- Adaptation (What MOTH Knows About Me)
+    "adaptation.profile": () => b().adaptation.profile(),
+    "adaptation.preferences": (p: any = {}) => b().adaptation.listPreferences(p ?? {}),
+    "adaptation.get": (p: { id: string }) => b().adaptation.getPreference(req(p.id, "id")),
+    "adaptation.add": (p: { content: string; area?: any; project?: string; scope?: "global" | "project" }) => b().adaptation.recordPreference({ content: req(p.content, "content"), area: p.area, project: p.project || null, scope: p.scope ?? (p.project ? "project" : "global"), explicit: true, source: "user" }, "user"),
+    "adaptation.confirm": (p: { id: string }) => b().adaptation.confirm(req(p.id, "id")),
+    "adaptation.reject": (p: { id: string }) => b().adaptation.reject(req(p.id, "id")),
+    "adaptation.outdated": (p: { id: string }) => b().adaptation.markOutdated(req(p.id, "id")),
+    "adaptation.edit": (p: { id: string; content?: string; area?: any; scope?: "global" | "project"; project?: string; pinned?: boolean }) => b().adaptation.edit(req(p.id, "id"), p),
+    "adaptation.delete": (p: { id: string; confirm: boolean }) => b().adaptation.deletePreference(req(p.id, "id"), p.confirm === true),
+    "adaptation.relevant": (p: { task: string; project?: string }) => {
+      const br = b();
+      const pr = p.project ? br.store.getProject(p.project) : null;
+      return br.adaptation.relevantPreferences(req(p.task, "task"), pr?.id ?? null);
+    },
+    "research.list": (p: { domain?: string; q?: string } = {}) => b().adaptation.listResearch(p ?? {}),
+    "lessons.list": () => b().adaptation.listLessons(),
+    "transfer.list": (p: { project_id: string; refresh?: boolean }) => (p.refresh ? b().adaptation.refreshTransfer(req(p.project_id, "project_id")).suggestions : b().adaptation.transferSuggestions(req(p.project_id, "project_id"))),
+    "transfer.decide": (p: { id: number; decision: "dismissed" | "accepted" }) => b().adaptation.decideTransfer(Number(p.id), p.decision === "accepted" ? "accepted" : "dismissed"),
+
+    // ---------------------------------------------------------------- Claude Inbox folder, vault sync, file import
+    "folders.status": () => b().folders.inboxStatus(),
+    "folders.setupInbox": (p: { folder: string }) => b().folders.setupInbox(req(p.folder, "folder")),
+    "folders.scanInbox": () => b().folders.scanInbox(true),
+    "folders.syncVault": () => b().folders.syncVault(),
+    "import.files": (p: { files: string[] }) => b().folders.importFiles(Array.isArray(p.files) ? p.files : []),
 
     // ---------------------------------------------------------------- cortex (local intelligence)
     "cortex.status": () => b().cortex.status(),
@@ -245,7 +310,8 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
     "cortex.retrievalFeedback": (p: { query?: string; useful?: string[]; not_useful?: string[] }) => ({ recorded: b().cortex.recordRetrievalFeedback({ ...p, source: "user" }) }),
 
     // ---------------------------------------------------------------- connections
-    "connections.status": () => ({ ...connectionStatus(b()), http_running: c.httpMcpRunning(), http_token: b().settings.get("mcp.http.token") || null }),
+    "connections.status": () => ({ ...connectionStatus(b()), clients: clientStates(b()), http_running: c.httpMcpRunning(), http_token: b().settings.get("mcp.http.token") || null }),
+    "connections.diagnostics": () => diagnostics(b()),
     "connections.configureDesktop": () => configureClaudeDesktop(b()),
     "connections.removeDesktop": () => removeClaudeDesktop(b()),
     "connections.configureCode": (p: { hooks?: boolean } = {}) => configureClaudeCode(b(), p?.hooks !== false),
@@ -268,6 +334,8 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
     // ---------------------------------------------------------------- data
     "backup.create": () => b().backup("manual"),
     "backup.list": () => b().listBackups(),
+    "backup.inspect": (p: { name: string }) => b().inspectBackup(req(p.name, "name")),
+    "backup.status": () => ({ auto: b().settings.get("backup.auto"), keep: b().settings.get("backup.keep"), interval_hours: b().settings.get("backup.intervalHours"), folder: b().backupDir(), default_folder: b().paths.backups, last_ok: b().settings.get("backup.lastOk") || null, last_error: b().settings.get("backup.lastError") || null }),
     "backup.restore": (p: { name: string }) => {
       const r = b().stageRestore(req(p.name, "name"));
       c.reopen();

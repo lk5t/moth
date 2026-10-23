@@ -8,6 +8,11 @@ export const RELATION_TYPES = [
 ] as const;
 export type RelationType = (typeof RELATION_TYPES)[number];
 
+export const MEMORY_TYPES = ["episodic", "semantic", "procedural", "project", "preference", "research", "lesson"] as const;
+export type MemoryType = (typeof MEMORY_TYPES)[number];
+export const SCOPES = ["global", "project", "private"] as const;
+export type Scope = (typeof SCOPES)[number];
+
 export type MemoryStatus = "active" | "archived" | "superseded" | "merged";
 export type Actor = "claude" | "moth" | "user" | "system";
 export type Verification = "unverified" | "verified" | "user_confirmed" | "disputed";
@@ -41,6 +46,11 @@ export interface Memory {
   access_count: number;
   last_accessed_at: string | null;
   is_demo: boolean;
+  memory_type: MemoryType;
+  scope: Scope;
+  pinned: boolean;
+  domain: string;
+  evidence: "sourced" | "unsourced" | "speculative" | null;
 }
 
 export interface Relationship {
@@ -70,6 +80,8 @@ export interface Project {
   created_at: string;
   updated_at: string;
   last_activity_at: string | null;
+  transfer_enabled: boolean;
+  private: boolean;
 }
 
 export interface MemoryInput {
@@ -87,6 +99,11 @@ export interface MemoryInput {
   verification?: Verification;
   task_state?: "open" | "done" | null;
   is_demo?: boolean;
+  memory_type?: MemoryType;
+  scope?: Scope;
+  pinned?: boolean;
+  domain?: string;
+  evidence?: "sourced" | "unsourced" | "speculative" | null;
 }
 
 export interface ChangeContext {

@@ -36,7 +36,7 @@ export class Database {
     if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true });
     this.raw = new DatabaseSync(file, { readOnly: opts.readOnly ?? false });
     this.raw.exec("PRAGMA busy_timeout = 8000");
-    if (file !== ":memory:") this.raw.exec("PRAGMA journal_mode = WAL");
+    if (file !== ":memory:" && !opts.readOnly) this.raw.exec("PRAGMA journal_mode = WAL");
     this.raw.exec("PRAGMA foreign_keys = ON");
     this.raw.exec("PRAGMA synchronous = NORMAL");
     this.raw.exec("PRAGMA temp_store = MEMORY");

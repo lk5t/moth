@@ -22,6 +22,8 @@ export class JobQueue {
   private current: { id: number; ctl: AbortController } | null = null;
   readonly workerId = `w${process.pid}`;
   onChange?: () => void;
+  /** Optional SQL condition limiting which jobs may be claimed now (paused learning, Privacy Mode, busy PC). */
+  heldSql?: () => string | null;
 
   constructor(private db: Database) {}
 
@@ -91,6 +93,23 @@ export class JobQueue {
     this.current?.ctl.abort();
   }
 
+  /** Stops claiming new jobs and waits (up to timeoutMs) for the running one; then aborts it. */
+  async drain(timeoutMs = 8000): Promise<void> {
+    this.stopped = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    const end = Date.now() + timeoutMs;
+    while (this.running && Date.now() < end) await new Promise((r) => setTimeout(r, 100));
+    this.current?.ctl.abort();
+    // Give the aborted job a moment to record its state before the database closes.
+    const hard = Date.now() + 3000;
+    while (this.running && Date.now() < hard) await new Promise((r) => setTimeout(r, 50));
+  }
+
+  isRunning(): boolean {
+    return this.running;
+  }
+
   kick(delay = 50): void {
     if (this.stopped) return;
     if (this.timer) clearTimeout(this.timer);
@@ -101,9 +120,15 @@ export class JobQueue {
     const t = nowIso();
     const kinds = [...this.handlers.keys()];
     if (!kinds.length) return undefined;
+    let held: string | null = null;
+    try {
+      held = this.heldSql?.() ?? null;
+    } catch {
+      held = null;
+    }
     return this.db.get<Row>(
       `UPDATE jobs SET status = 'running', attempts = attempts + 1, locked_by = ?, locked_at = ?, updated_at = ?
-       WHERE id = (SELECT id FROM jobs WHERE status = 'pending' AND run_after <= ? AND kind IN (${kinds.map(() => "?").join(",")}) ORDER BY priority ASC, id ASC LIMIT 1)
+       WHERE id = (SELECT id FROM jobs WHERE status = 'pending' AND run_after <= ? AND kind IN (${kinds.map(() => "?").join(",")}) ${held ? `AND ${held}` : ""} ORDER BY priority ASC, id ASC LIMIT 1)
        RETURNING *`,
       [this.workerId, t, t, t, ...kinds],
     );
@@ -115,6 +140,7 @@ export class JobQueue {
     this.running = true;
     try {
       for (let n = 0; n < 25; n++) {
+        if (this.stopped && n > 0) break;
         const row = this.claim();
         if (!row) break;
         const job: Job = { id: Number(row.id), kind: row.kind as string, payload: safeJson(row.payload as string, {}), attempts: Number(row.attempts), max_attempts: Number(row.max_attempts) };
@@ -139,13 +165,20 @@ export class JobQueue {
           this.current = null;
         }
         this.onChange?.();
+        if (this.stopped) break;
         await new Promise((r) => setImmediate(r)); // keep the event loop (and API) responsive
       }
     } finally {
       this.running = false;
     }
     if (this.stopped) return;
-    const next = this.db.value<string>("SELECT MIN(run_after) FROM jobs WHERE status = 'pending'");
+    let held: string | null = null;
+    try {
+      held = this.heldSql?.() ?? null;
+    } catch {
+      held = null;
+    }
+    const next = this.db.value<string>(`SELECT MIN(run_after) FROM jobs WHERE status = 'pending' ${held ? `AND ${held}` : ""}`);
     const wait = next ? Math.max(200, Math.min(60_000, Date.parse(next) - Date.now())) : 60_000;
     this.kick(wait);
   }

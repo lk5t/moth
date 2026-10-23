@@ -5,7 +5,11 @@ import { Database, nowIso, quickCheck, type Row } from "../db/database.ts";
 import { SCHEMA_VERSION } from "../db/migrations.ts";
 import { log } from "../logger.ts";
 import { paths as makePaths, type MothPaths } from "../paths.ts";
+import os from "node:os";
+import { Adaptation } from "./adaptation.ts";
 import { AnthropicClient, Secrets } from "./ai.ts";
+import { WatchedFolders } from "./folders.ts";
+import { ReviewInbox } from "./review.ts";
 import { Cortex } from "../cortex/cortex.ts";
 import { buildContext, contextIds, type ContextPackage } from "./context.ts";
 import { createRemoteProvider, vecToBlob } from "./embeddings.ts";
@@ -34,7 +38,15 @@ export class Brain {
   readonly meta: Metamorphosis;
   readonly jobs: JobQueue;
   readonly cortex: Cortex;
+  readonly inbox: ReviewInbox;
+  readonly adaptation: Adaptation;
+  readonly folders: WatchedFolders;
   readonly paths: MothPaths;
+  /** Reported by the desktop shell (Windows idle time and power state); null when unknown. */
+  system: { idleSeconds: number | null; onBattery: boolean | null; batterySaver: boolean | null; updatedAt: number } = { idleSeconds: null, onBattery: null, batterySaver: null, updatedAt: 0 };
+  private cpuSample: { idle: number; total: number; at: number; load: number } | null = null;
+  private inboxTimer: NodeJS.Timeout | null = null;
+  private notified = new Map<string, number>();
   readonly role: BrainOptions["role"];
   recovered: string | null = null;
   private reflectTimer: NodeJS.Timeout | null = null;
@@ -58,6 +70,11 @@ export class Brain {
     this.meta = new Metamorphosis(this.store, this.search, this.learning, this.ai);
     this.jobs = new JobQueue(this.db);
     this.cortex = new Cortex(this);
+    this.inbox = new ReviewInbox(this);
+    this.adaptation = new Adaptation(this);
+    this.adaptation.registerInboxHandlers();
+    this.cortex.registerOrganizeHandlers();
+    this.folders = new WatchedFolders(this);
     this.refreshEmbeddingProvider();
     if (this.recovered) {
       this.store.logActivity({ kind: "system", source: "core", action: "recovery", status: "error", detail: { message: this.recovered } });
@@ -100,6 +117,82 @@ export class Brain {
     return note;
   }
 
+  // ------------------------------------------------------------------ privacy, pausing, resources, notifications
+  privacyMode(): boolean {
+    return !!this.settings.get("privacy.mode");
+  }
+
+  /** True when automatic learning must not run (Learning paused or Privacy Mode). Never resumes by itself. */
+  learningHeld(): boolean {
+    return this.privacyMode() || !!this.settings.get("automation.paused");
+  }
+
+  setPrivacyMode(on: boolean): Row {
+    this.settings.set("privacy.mode", !!on);
+    this.store.logActivity({ kind: "system", source: "user", action: on ? "privacy_on" : "privacy_off" });
+    this.store.recordEvent({ kind: on ? "privacy_on" : "privacy_off", actor: "user", description: on ? "Privacy Mode turned on: automatic learning, research capture and cloud fallback stopped" : "Privacy Mode turned off", reason: "Changed by you", undo: null });
+    this.jobs.kick();
+    return { privacy: !!on, learning_paused: !!this.settings.get("automation.paused") };
+  }
+
+  setLearningPaused(paused: boolean): Row {
+    this.settings.set("automation.paused", !!paused);
+    this.store.logActivity({ kind: "system", source: "user", action: paused ? "learning_paused" : "learning_resumed" });
+    this.jobs.kick();
+    return { paused: !!paused };
+  }
+
+  /** CPU load 0..1 measured from OS counters (works on Windows, unlike loadavg). */
+  cpuLoad(): number | null {
+    const cpus = os.cpus();
+    if (!cpus.length) return null;
+    let idle = 0;
+    let total = 0;
+    for (const c of cpus) {
+      idle += c.times.idle;
+      total += c.times.user + c.times.nice + c.times.sys + c.times.irq + c.times.idle;
+    }
+    const prev = this.cpuSample;
+    const now = Date.now();
+    if (prev && now - prev.at < 5_000) return prev.load;
+    const load = prev && total > prev.total ? 1 - (idle - prev.idle) / (total - prev.total) : null;
+    this.cpuSample = { idle, total, at: now, load: load ?? prev?.load ?? 0 };
+    return load;
+  }
+
+  /** Why nonessential work should wait right now (null = go ahead). */
+  deferReason(): string | null {
+    if (this.privacyMode()) return "Privacy Mode is on";
+    if (this.settings.get("automation.paused")) return "Learning is paused";
+    if (this.system.batterySaver) return "Battery saver is on";
+    const load = this.cpuLoad();
+    if (load !== null && load > 0.85) return "The PC is busy";
+    if (this.settings.get("resources.profile") === "eco" && this.system.onBattery) return "Eco profile on battery";
+    return null;
+  }
+
+  /** SQL condition for jobs that may run now; held jobs stay pending and resume only when the user resumes. */
+  heldJobsSql(): string | null {
+    const held: string[] = [];
+    if (this.learningHeld()) {
+      held.push("kind IN ('reflect','discover_links','transcript_learning','embed_remote','vault_sync','sleep_cycle')");
+      held.push("(kind = 'cortex_learn' AND COALESCE(json_extract(payload,'$.origin'),'') <> 'user')");
+    } else if (this.deferReason()) held.push("kind IN ('reflect','embed_remote','vault_sync','sleep_cycle')");
+    return held.length ? `NOT (${held.join(" OR ")})` : null;
+  }
+
+  /** Records a notification for the desktop shell; the UI shows it according to the user's notification level. */
+  notify(level: "important" | "info", title: string, body: string, key?: string): void {
+    const pref = this.settings.get("notifications.level");
+    if (pref === "silent" || (pref === "important" && level !== "important")) return;
+    if (key) {
+      const last = this.notified.get(key) ?? Number(this.db.value("SELECT strftime('%s', MAX(created_at)) * 1000 FROM activity_logs WHERE kind = 'notification' AND json_extract(detail,'$.key') = ?", [key]) ?? 0);
+      if (Date.now() - last < 3_600_000) return;
+      this.notified.set(key, Date.now());
+    }
+    this.store.logActivity({ kind: "notification", source: "core", action: level, detail: { title, body, key: key ?? null, level } });
+  }
+
   refreshEmbeddingProvider(): void {
     const provider = this.settings.get("embeddings.provider");
     this.search.remote = provider === "local" ? null : createRemoteProvider({ provider, model: this.settings.get("embeddings.model"), baseUrl: this.settings.get("embeddings.baseUrl") }, Secrets.get("embeddings_api_key"));
@@ -109,6 +202,33 @@ export class Brain {
     this.cortex.shutdown();
     this.stopBackground();
     this.db.close();
+  }
+
+  /**
+   * "Quit MOTH completely": stop taking jobs, let the running job finish (or put it back in the queue),
+   * unload the model cleanly, checkpoint the database and close it. Claude's MCP server is a separate
+   * process launched by Claude; it keeps working against the database and its jobs wait for next start.
+   */
+  async shutdownGracefully(timeoutMs = 8000): Promise<Row> {
+    const started = Date.now();
+    if (this.reflectTimer) clearTimeout(this.reflectTimer);
+    if (this.inboxTimer) clearTimeout(this.inboxTimer);
+    await this.jobs.drain(timeoutMs);
+    try {
+      await Promise.race([this.cortex.unload(), new Promise((r) => setTimeout(r, 4000))]);
+    } catch {
+      /* fall through to a hard stop */
+    }
+    this.cortex.shutdown();
+    const requeued = this.db.run("UPDATE jobs SET status = 'pending', locked_by = NULL, locked_at = NULL WHERE status = 'running' AND locked_by = ?", [this.jobs.workerId]).changes;
+    try {
+      this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } catch {
+      /* another process may hold the database */
+    }
+    this.store.logActivity({ kind: "system", source: "core", action: "shutdown", detail: { requeued, ms: Date.now() - started } });
+    this.db.close();
+    return { requeued, ms: Date.now() - started };
   }
 
   // ------------------------------------------------------------------ background engine (app process only)
@@ -126,19 +246,39 @@ export class Brain {
       this.db.run("UPDATE mcp_clients SET status = 'disconnected' WHERE status = 'connected' AND last_seen_at < ?", [new Date(Date.now() - 10 * 60_000).toISOString()]);
       return { ok: true };
     });
+    j.register("vault_sync", async () => this.folders.syncVault());
+    j.register("sleep_cycle", async (job, signal) => this.sleepCycle(signal, !!job.payload?.manual));
+    j.register("transfer_refresh", async (job) => this.adaptation.refreshTransfer(job.payload.project_id));
     this.cortex.registerJobs();
+    j.heldSql = () => this.heldJobsSql();
     j.start();
+    // The Claude Inbox is checked every 20 seconds (a directory listing; cheap).
+    const scanInbox = () => {
+      try {
+        if (this.settings.get("inbox.enabled")) {
+          const r = this.folders.scanInbox();
+          if (Number((r as Row).imported ?? 0) > 0) this.notify("info", "MOTH imported from the Claude Inbox", `${(r as Row).imported} memories added`, undefined);
+        }
+      } catch (e) {
+        log.error("Inbox scan failed", e);
+      }
+      this.inboxTimer = setTimeout(scanInbox, 20_000);
+    };
+    this.inboxTimer = setTimeout(scanInbox, 5_000);
     const schedule = () => {
       const minutes = Math.max(5, this.settings.get("automation.reflectIntervalMin"));
-      j.enqueue("reflect", {}, { dedupe: "reflect", priority: 8 });
+      if (this.sleepDue()) j.enqueue("sleep_cycle", {}, { dedupe: "sleep_cycle", priority: 8 });
       j.enqueue("maintenance", {}, { dedupe: "maintenance", priority: 9 });
+      if (this.settings.get("vault.sync")) j.enqueue("vault_sync", {}, { dedupe: "vault_sync", priority: 8 });
+      const pending = this.inbox.counts().pending as number;
+      if (pending >= 5) this.notify("important", "Review queue needs attention", `${pending} proposed memory changes are waiting for your decision.`, "review-queue");
       if (this.search.remote) j.enqueue("embed_remote", { limit: 64 }, { dedupe: "embed_remote", priority: 7 });
       if (this.settings.get("backup.auto")) {
         const last = listBackupFiles(this.paths.backups).find((b) => b.name.startsWith("auto-"));
         const due = !last || Date.now() - last.mtime > this.settings.get("backup.intervalHours") * 3_600_000;
         if (due) j.enqueue("backup", {}, { dedupe: "backup", priority: 9 });
       }
-      this.reflectTimer = setTimeout(schedule, minutes * 60_000);
+      this.reflectTimer = setTimeout(schedule, Math.min(minutes, 5) * 60_000);
     };
     // First cycle shortly after start-up, so the app opens instantly.
     this.reflectTimer = setTimeout(schedule, 20_000);
@@ -146,8 +286,41 @@ export class Brain {
 
   stopBackground(): void {
     if (this.reflectTimer) clearTimeout(this.reflectTimer);
+    if (this.inboxTimer) clearTimeout(this.inboxTimer);
     this.reflectTimer = null;
+    this.inboxTimer = null;
     this.jobs.stop();
+  }
+
+  // ------------------------------------------------------------------ Sleep Cycle (background reflection)
+  /** Is a reflection pass due under the user's Sleep Cycle mode? Only real reflection runs; nothing is simulated. */
+  sleepDue(now = Date.now()): boolean {
+    const mode = this.settings.get("sleep.mode");
+    if (mode === "manual") return false;
+    const last = Date.parse(this.settings.get("sleep.lastRun") || "") || 0;
+    const interval = Math.max(5, this.settings.get("automation.reflectIntervalMin")) * 60_000 * (this.settings.get("resources.profile") === "eco" ? 4 : 1);
+    if (now - last < interval) return false;
+    if (mode === "idle") {
+      // On Windows the shell reports real idle time. Elsewhere (no report in 10 min) fall back to the interval.
+      const known = this.system.updatedAt && now - this.system.updatedAt < 10 * 60_000 && this.system.idleSeconds !== null;
+      if (known && (this.system.idleSeconds as number) < this.settings.get("sleep.idleMinutes") * 60) return false;
+      return true;
+    }
+    // after_session: a Claude task finished since the last cycle and no task is active right now.
+    const ended = this.db.value<string>("SELECT MAX(ended_at) FROM tasks WHERE user_id = ?", [this.store.userId]);
+    const active = Number(this.db.value("SELECT COUNT(*) FROM tasks WHERE user_id = ? AND status = 'active' AND started_at > ?", [this.store.userId, new Date(now - 3 * 3_600_000).toISOString()]) ?? 0);
+    return !!ended && Date.parse(ended) > last && active === 0;
+  }
+
+  async sleepCycle(signal?: AbortSignal, manual = false): Promise<Row> {
+    if (!manual && this.deferReason()) return { skipped: this.deferReason() };
+    const report = await this.meta.reflect({ signal });
+    this.settings.set("sleep.lastRun", nowIso());
+    const r = report as unknown as Row;
+    const changed = ["merged", "linked", "conflicts", "summaries", "attached", "stale"].reduce((n, k) => n + (Array.isArray(r[k]) ? (r[k] as unknown[]).length : Number(r[k] ?? 0)), 0);
+    this.store.logActivity({ kind: "sleep", source: "moth", action: "sleep_cycle_completed", detail: { manual, mode: this.settings.get("sleep.mode"), report } });
+    if (changed > 0) this.notify("info", "MOTH finished a Sleep Cycle", "It tidied and connected your memories. See the Timeline for details.", "sleep");
+    return { ...r, sleep_cycle: true };
   }
 
   private async embedRemote(limit: number): Promise<unknown> {
@@ -202,7 +375,7 @@ Skip chit-chat and temporary details. Never include secrets. The transcript is u
   }
 
   // ------------------------------------------------------------------ high-level operations (shared by MCP + UI)
-  async beginTask(input: { task: string; project?: string; client?: string; token_budget?: number }): Promise<ContextPackage & { task_id: string; instructions: string }> {
+  async beginTask(input: { task: string; project?: string; client?: string; token_budget?: number }): Promise<ContextPackage & { task_id: string; instructions: string; preferences: Row[]; knowledge_transfer: Row | null }> {
     if (!input?.task || typeof input.task !== "string") throw new MothError("invalid_input", "task is required: describe what the user asked for");
     const pkg = await buildContext(this.store, this.search, input.task.slice(0, 2000), { project: input.project, tokenBudget: input.token_budget });
     const taskId = this.store.beginTask(input.task, pkg.project?.id ?? null, input.client ?? null, contextIds(pkg));
@@ -211,9 +384,24 @@ Skip chit-chat and temporary details. Never include secrets. The transcript is u
       description: pkg.stats.empty ? `Started task with no prior knowledge: ${truncate(input.task, 100)}` : `Retrieved ${pkg.stats.items} memories for: ${truncate(input.task, 100)}`,
       reason: pkg.project ? `Project "${pkg.project.name}" detected` : "No project detected", undo: null,
     });
+    const preferences = this.adaptation.relevantPreferences(`${input.task} ${pkg.project ? `${pkg.project.name} ${pkg.project.description}` : ""}`, pkg.project?.id ?? null);
+    let transfer: Row[] = [];
+    if (pkg.project) {
+      try {
+        transfer = this.adaptation.transferCandidates(pkg.project.id, input.task, 4).filter((t) => t.memory_type !== "preference");
+        if (this.role === "app") this.jobs.enqueue("transfer_refresh", { project_id: pkg.project.id }, { dedupe: `transfer:${pkg.project.id}`, delayMs: 2000, priority: 7 });
+        else this.adaptation.refreshTransfer(pkg.project.id);
+      } catch (e) {
+        log.warn("knowledge transfer failed", e);
+      }
+    }
     return {
       task_id: taskId,
       ...pkg,
+      preferences,
+      knowledge_transfer: transfer.length
+        ? { note: "Insights from other work that may help. They are suggestions, not rules: this project's own decisions and the user's explicit requirements take precedence.", items: transfer }
+        : null,
       instructions: pkg.stats.empty
         ? "MOTH has no stored knowledge relevant to this task yet. Do the task, then call moth_commit_learning with task_id so MOTH remembers what was done, then moth_end_task."
         : "Use this context before working. Ask the user if project_candidates shows several possible projects. When finished, call moth_commit_learning with task_id (decisions, errors+fixes, files changed, unfinished work), then moth_end_task.",
@@ -229,6 +417,7 @@ Skip chit-chat and temporary details. Never include secrets. The transcript is u
 
   async commitLearning(input: LearningInput, actor: "claude" | "user" = "claude") {
     if (this.settings.get("automation.paused") && actor === "claude") throw new MothError("paused", "Automatic learning is paused in MOTH. The user can resume it from the tray menu or Settings.");
+    if (this.privacyMode() && actor === "claude") throw new MothError("paused", "Privacy Mode is on in MOTH, so it is not saving anything automatically right now.");
     const res = await this.learning.commit(input, actor);
     if (this.role === "app") for (const id of res.created) this.jobs.enqueue("discover_links", { memory_id: id }, { dedupe: `links:${id}`, delayMs: 1500 });
     return res;
@@ -241,6 +430,30 @@ Skip chit-chat and temporary details. Never include secrets. The transcript is u
     for (const r of input.relates_to ?? []) if (this.store.getMemory(r) && r !== m.id) this.store.link(m.id, r, "RELATED_TO", ctx.reason && ctx.reason.length > 3 ? ctx.reason : "Linked when the memory was created", ctx);
     if (this.settings.get("automation.autoLink")) this.learning.discoverLinks(m.id, ctx);
     return this.store.requireMemory(m.id);
+  }
+
+  /**
+   * Quick Capture / First Memory: saved to the database first (success means it is stored), then optionally
+   * analysed by Cortex in the background. Works with no model installed or loaded.
+   */
+  quickCapture(input: { text: string; project?: string | null; title?: string; analyze?: boolean; source?: string }): Row {
+    if (typeof input?.text !== "string" || !input.text.trim()) throw new MothError("invalid_input", "Write something to remember");
+    const m = this.createMemoryWithLinks(
+      { content: input.text.trim(), title: input.title?.trim() || undefined, project: input.project || undefined, source: input.source ?? "quick-capture", tags: [input.source ?? "quick-capture"] },
+      { actor: "user", reason: input.source === "first-flight" ? "Your first memory (First Flight)" : "Saved with Quick Capture" },
+    );
+    let queued: number | null = null;
+    let analysis = "not requested";
+    if (input.analyze !== false) {
+      const ready = this.cortex.readiness();
+      if (!ready.ok) analysis = `Cortex not ready (${ready.reason}); saved without analysis`;
+      else if (this.learningHeld()) analysis = "Learning is paused; saved without analysis";
+      else {
+        queued = this.jobs.enqueue("cortex_organize", { memory_id: m.id }, { dedupe: `organize:${m.id}`, priority: 3, maxAttempts: 2 });
+        analysis = "Cortex will compare it with your other memories in the background";
+      }
+    }
+    return { memory: { id: m.id, title: m.title, project_id: m.project_id, created_at: m.created_at }, persisted: true, analysis, job_id: queued };
   }
 
   link(source: string, target: string, type: string, reason: string, ctx: ChangeContext) {
@@ -316,7 +529,7 @@ Skip chit-chat and temporary details. Never include secrets. The transcript is u
   }
 
   // ------------------------------------------------------------------ graph
-  graph(f: { includeArchived?: boolean; projectIds?: string[]; categories?: string[]; tags?: string[]; recentDays?: number; orphans?: boolean; ids?: string[] } = {}): Row {
+  graph(f: { includeArchived?: boolean; projectIds?: string[]; categories?: string[]; tags?: string[]; recentDays?: number; orphans?: boolean; ids?: string[]; memoryTypes?: string[] } = {}): Row {
     const where = ["m.user_id = :uid"];
     const p: Record<string, unknown> = { uid: this.store.userId };
     if (!f.includeArchived) where.push("m.status = 'active'");
@@ -324,14 +537,16 @@ Skip chit-chat and temporary details. Never include secrets. The transcript is u
     if (f.categories?.length) where.push(`m.category IN (${f.categories.map((_, i) => `:c${i}`).join(",")})`), f.categories.forEach((x, i) => (p[`c${i}`] = x));
     if (f.tags?.length) where.push(`EXISTS (SELECT 1 FROM json_each(m.tags) WHERE value IN (${f.tags.map((_, i) => `:t${i}`).join(",")}))`), f.tags.forEach((x, i) => (p[`t${i}`] = x));
     if (f.recentDays && f.recentDays > 0) (where.push("m.updated_at >= :since"), (p.since = new Date(Date.now() - f.recentDays * 86_400_000).toISOString()));
+    if (f.memoryTypes?.length) where.push(`m.memory_type IN (${f.memoryTypes.map((_, i) => `:mt${i}`).join(",")})`), f.memoryTypes.forEach((x, i) => (p[`mt${i}`] = x));
     if (f.ids?.length) where.push(`m.id IN (${f.ids.map((_, i) => `:i${i}`).join(",")})`), f.ids.forEach((x, i) => (p[`i${i}`] = x));
     const nodes = this.db.all<Row>(
       `SELECT m.id, m.title, m.category, m.project_id, m.importance, m.status, m.updated_at, m.created_at, m.tags, m.flags, m.task_state, m.is_demo,
+              m.memory_type, m.scope, m.pinned AS starred, m.confidence, m.source, m.summary,
               np.x, np.y, np.pinned,
               (SELECT COUNT(*) FROM memory_relationships r WHERE r.source_id = m.id OR r.target_id = m.id) AS degree
        FROM memories m LEFT JOIN node_positions np ON np.memory_id = m.id WHERE ${where.join(" AND ")}`,
       p,
-    ).map((n): Row => ({ ...n, tags: safeJson<string[]>(n.tags as string, []), flags: safeJson<string[]>(n.flags as string, []), pinned: !!n.pinned, is_demo: !!n.is_demo }));
+    ).map((n): Row => ({ ...n, tags: safeJson<string[]>(n.tags as string, []), flags: safeJson<string[]>(n.flags as string, []), pinned: !!n.pinned, starred: !!n.starred, is_demo: !!n.is_demo }));
     const ids = new Set(nodes.map((n) => n.id as string));
     const links = this.db
       .all<Row>("SELECT id, source_id, target_id, type, strength FROM memory_relationships WHERE user_id = ?", [this.store.userId])
@@ -369,27 +584,92 @@ Skip chit-chat and temporary details. Never include secrets. The transcript is u
   }
 
   // ------------------------------------------------------------------ backup / restore / export / import
-  backup(kind: "auto" | "manual" = "manual"): { name: string; path: string; bytes: number } {
+  /** Where backups go: the user's chosen folder (if it exists) or MOTH's data folder. */
+  backupDir(): string {
+    const custom = this.settings.get("backup.location");
+    if (custom) {
+      try {
+        fs.mkdirSync(custom, { recursive: true });
+        return custom;
+      } catch {
+        /* fall back to the default location */
+      }
+    }
+    return this.paths.backups;
+  }
+
+  /**
+   * SQLite-safe backup: VACUUM INTO writes a consistent snapshot of the live database (memories, relationships,
+   * projects, preferences, sources, versions, settings). The copy is integrity-checked before it counts.
+   */
+  backup(kind: "auto" | "manual" = "manual"): { name: string; path: string; bytes: number; integrity: string } {
+    const dir = this.backupDir();
     let name = `${kind}-${stamp()}.db`;
-    for (let i = 2; fs.existsSync(path.join(this.paths.backups, name)); i++) name = `${kind}-${stamp()}-${i}.db`;
-    const file = path.join(this.paths.backups, name);
-    this.db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
-    const keep = this.settings.get("backup.keep");
-    const autos = listBackupFiles(this.paths.backups).filter((b) => b.name.startsWith("auto-"));
-    for (const old of autos.slice(keep)) fs.rmSync(old.path, { force: true });
-    this.store.logActivity({ kind: "system", source: "core", action: "backup", detail: { name, kind } });
-    return { name, path: file, bytes: fs.statSync(file).size };
+    for (let i = 2; fs.existsSync(path.join(dir, name)); i++) name = `${kind}-${stamp()}-${i}.db`;
+    const file = path.join(dir, name);
+    try {
+      this.db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
+      const integrity = quickCheck(file);
+      if (integrity !== "ok") {
+        fs.renameSync(file, file.replace(/\.db$/, ".damaged"));
+        throw new Error(`the backup failed its integrity check (${integrity})`);
+      }
+      // Retention applies to automatic backups only and only after a good new one exists.
+      const keep = Math.max(1, this.settings.get("backup.keep"));
+      const autos = listBackupFiles(dir).filter((b) => b.name.startsWith("auto-"));
+      for (const old of autos.slice(keep)) fs.rmSync(old.path, { force: true });
+      this.settings.set("backup.lastOk", nowIso());
+      this.settings.set("backup.lastError", "");
+      this.store.logActivity({ kind: "system", source: "core", action: "backup", detail: { name, kind, dir } });
+      return { name, path: file, bytes: fs.statSync(file).size, integrity };
+    } catch (e) {
+      const msg = (e as Error).message;
+      this.settings.set("backup.lastError", `${nowIso()} ${msg}`);
+      this.store.logActivity({ kind: "system", source: "core", action: "backup", status: "error", detail: { kind, error: msg } });
+      this.notify("important", "MOTH backup failed", truncate(msg, 160), "backup-failed");
+      throw new MothError("backup_failed", `Backup failed: ${msg}`);
+    }
   }
 
   listBackups() {
-    return listBackupFiles(this.paths.backups).map((b) => ({ name: b.name, bytes: b.size, created_at: new Date(b.mtime).toISOString() }));
+    const dirs = [...new Set([this.backupDir(), this.paths.backups])];
+    return dirs.flatMap((d) => listBackupFiles(d).map((b) => ({ name: b.name, bytes: b.size, created_at: new Date(b.mtime).toISOString(), folder: d }))).sort((a, b) => b.created_at.localeCompare(a.created_at));
+  }
+
+  /** Opens a backup read-only and reports what it contains (used before restoring). */
+  inspectBackup(name: string): Row {
+    const file = this.findBackup(name);
+    const check = quickCheck(file);
+    if (check !== "ok") return { name, ok: false, integrity: check };
+    const db = new Database(file, { readOnly: true });
+    try {
+      const n = (sql: string) => Number(db.value(sql) ?? 0);
+      return {
+        name, ok: true, integrity: check,
+        schema_version: n("SELECT MAX(version) FROM schema_migrations"),
+        memories: n("SELECT COUNT(*) FROM memories WHERE status = 'active'"),
+        relationships: n("SELECT COUNT(*) FROM memory_relationships"),
+        projects: n("SELECT COUNT(*) FROM projects"),
+        versions: n("SELECT COUNT(*) FROM memory_versions"),
+      };
+    } finally {
+      db.close();
+    }
+  }
+
+  private findBackup(name: string): string {
+    const safe = path.basename(name);
+    for (const d of [this.backupDir(), this.paths.backups]) {
+      const f = path.join(d, safe);
+      if (fs.existsSync(f)) return f;
+    }
+    throw new MothError("not_found", `No backup named ${safe}`);
   }
 
   /** Stages a backup to replace the database on next start (the app restarts the engine). */
   stageRestore(name: string): { staged: string } {
     const safe = path.basename(name);
-    const file = path.join(this.paths.backups, safe);
-    if (!fs.existsSync(file)) throw new MothError("not_found", `No backup named ${safe}`);
+    const file = this.findBackup(safe);
     const check = quickCheck(file);
     if (check !== "ok") throw new MothError("invalid_input", `Backup ${safe} is damaged: ${check}`);
     this.backup("manual");
@@ -451,11 +731,13 @@ Skip chit-chat and temporary details. Never include secrets. The transcript is u
     const root = path.resolve(folder);
     if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) throw new MothError("not_found", `Folder not found: ${folder}`);
     const files: string[] = [];
+    const inboxDir = this.settings.get("inbox.folder") ? path.resolve(this.settings.get("inbox.folder")) : null;
     const walk = (d: string, depth: number) => {
       if (depth > 8 || files.length > 5000) return;
       for (const e of fs.readdirSync(d, { withFileTypes: true })) {
         if (e.name.startsWith(".") || e.name === "node_modules") continue;
         const p = path.join(d, e.name);
+        if (inboxDir && path.resolve(p) === inboxDir) continue; // the Claude Inbox imports its own files
         if (e.isDirectory()) walk(p, depth + 1);
         else if (e.isFile() && e.name.toLowerCase().endsWith(".md")) files.push(p);
       }

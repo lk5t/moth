@@ -140,15 +140,22 @@ export class Cortex {
       contextSize: this.s.get("cortex.contextSize"),
       threads: this.s.get("cortex.threads") || defaultThreads(),
       gpuLayers: variant === "vulkan" ? (this.s.get("cortex.gpuLayers") || 99) : 0,
-      idleTimeoutMs: Math.max(0.05, this.s.get("cortex.idleTimeoutMin")) * 60_000,
+      idleTimeoutMs: this.effectiveIdleMs(),
       stateFile: path.join(this.dir, "runtime-state.json"),
     };
     if (!this.rt) {
       fs.mkdirSync(this.dir, { recursive: true });
       this.rt = new LlamaRuntime(cfg);
       const statusFile = path.join(this.dir, "runtime-status.json");
+      let lastState = "unloaded";
       this.rt.onChange = () => {
         try {
+          const info = this.rt!.info();
+          if (info.state !== lastState) {
+            if (info.state === "ready") this.brain.store.logActivity({ kind: "cortex", source: "cortex", action: "load", detail: { model: info.model } });
+            if (lastState === "ready" && info.state === "unloaded") this.brain.store.logActivity({ kind: "cortex", source: "cortex", action: "unload", detail: { model: info.model } });
+            lastState = info.state;
+          }
           this.brain.db.run("INSERT INTO db_changes(entity, entity_id, op) VALUES ('cortex', 'runtime', 'update')");
           // Lets other MOTH processes (e.g. the MCP server Claude launches) report the live runtime state.
           fs.writeFileSync(statusFile, JSON.stringify({ ...this.rt!.info(), recentLog: undefined, written_at: nowIso(), pid_owner: process.pid }));
@@ -158,6 +165,14 @@ export class Cortex {
       };
     } else this.rt.configure(cfg);
     return this.rt;
+  }
+
+  /** Idle unload delay after applying the resource profile (Eco unloads sooner, Performance keeps the model longer). */
+  effectiveIdleMs(): number {
+    const base = Math.max(0.05, this.s.get("cortex.idleTimeoutMin"));
+    const profile = this.s.get("resources.profile");
+    const min = profile === "eco" ? Math.min(base, 2) : profile === "performance" ? Math.max(base, 15) : base;
+    return min * 60_000;
   }
 
   async hardware(refresh = false): Promise<Hardware> {
@@ -240,10 +255,12 @@ export class Cortex {
         if (!this.s.get("cortex.modelId")) this.s.set("cortex.modelId", model.id);
         this.install = { ...this.install, phase: "done", received: this.install.total };
         this.brain.store.logActivity({ kind: "cortex", source: "cortex", action: "install", detail: { model: model.id, runtime: runtime.id } });
+        this.brain.notify("important", "MOTH's brain is installed", `${model.family} ${model.parameters} is ready and verified. It runs only on this PC.`, "install-done");
       } catch (e) {
         const msg = (e as Error).name === "AbortError" || signal.aborted ? "Cancelled" : (e as Error).message;
         this.install = { ...this.install, phase: signal.aborted ? "cancelled" : "error", error: msg };
         this.brain.store.logActivity({ kind: "cortex", source: "cortex", action: "install", status: "error", detail: { error: msg } });
+        if (!signal.aborted) this.brain.notify("important", "Model installation failed", truncate(msg, 160), "install-failed");
         log.error("Cortex install failed", msg);
       } finally {
         ping();
@@ -304,6 +321,7 @@ export class Cortex {
   /** Enqueues a learning job (works from any process; the desktop app's engine processes it). */
   enqueueLearn(input: LearnInput, origin: string): number {
     this.cleanInput(input.text);
+    if (origin !== "user" && this.brain.privacyMode()) throw new MothError("paused", "Privacy Mode is on in MOTH, so it is not learning right now. The user can turn Privacy Mode off in MOTH.");
     const id = this.brain.jobs.enqueue("cortex_learn", { ...input, origin }, { priority: 2, maxAttempts: 2 });
     return id as number;
   }
@@ -318,8 +336,9 @@ export class Cortex {
     return null;
   }
 
-  async learn(input: LearnInput, signal?: AbortSignal): Promise<LearnReport> {
+  async learn(input: LearnInput & { origin?: string }, signal?: AbortSignal): Promise<LearnReport> {
     const started = Date.now();
+    if (input.origin && input.origin !== "user" && this.brain.learningHeld()) throw new MothError("paused", "Learning is paused or Privacy Mode is on");
     const text = this.cleanInput(input.text);
     const ready = this.readiness();
     if (!ready.ok && !this.router.status().cloud.ok) throw new MothError("cortex_unavailable", ready.reason ?? "Local AI is not available");
@@ -348,9 +367,10 @@ export class Cortex {
         // B. Recall
         const query = `${s.text} ${s.entities.join(" ")}`;
         const found = await this.brain.search.hybrid(query, {}, { limit: 6, minScore: 0.1, boostProjectId: sProject?.id ?? null });
-        const candidates: Candidate[] = found.filter((f) => f.memory.category !== "project").slice(0, 6).map((f, i) => ({ index: i + 1, memory: f.memory, similarity: f.score }));
+        const exclude = new Set((input as { exclude_ids?: string[] }).exclude_ids ?? []);
+        const candidates: Candidate[] = found.filter((f) => f.memory.category !== "project" && !exclude.has(f.memory.id)).slice(0, 6).map((f, i) => ({ index: i + 1, memory: f.memory, similarity: f.score }));
         const sims = this.brain.search.similarToText(s.text, 3);
-        const maxSim = sims.length ? Math.max(...sims.map((x) => (st.getMemory(x.id)?.status === "active" ? x.score : 0))) : 0;
+        const maxSim = sims.length ? Math.max(...sims.map((x) => (!exclude.has(x.id) && st.getMemory(x.id)?.status === "active" ? x.score : 0))) : 0;
         const fb = this.relevantFeedback(s.text);
         // C/D. Compare + propose
         const memList = candidates.length ? candidates.map((c) => `[${c.index}] ${c.memory.title}: ${truncate(c.memory.content, 500)} (updated ${c.memory.updated_at.slice(0, 10)})`).join("\n") : "(no related memories found)";
@@ -465,11 +485,12 @@ export class Cortex {
       const flags = [...new Set([...target.flags, "possible_conflict"])];
       this.brain.db.run("UPDATE memories SET flags = ? WHERE id = ?", [JSON.stringify(flags), target.id]);
       this.brain.store.recordEvent({ kind: "conflict_flagged", actor: "moth", memory_id: target.id, project_id: target.project_id, description: `New information may contradict "${target.title}"`, reason: truncate(statement, 200), undo: { op: "unflag", flag: "possible_conflict", memory_id: target.id } });
+      this.brain.notify("important", "Memory conflict needs your decision", `New information may contradict "${truncate(target.title, 60)}". Open the Review Queue.`, `conflict-${target.id}`);
     }
     const r = this.brain.db.run(
-      `INSERT INTO review_queue(user_id, status, operation, target_memory_id, proposal, statement, relation, reason, risk, confidence, provider, model, source, source_ref, task_id, created_at)
-       VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [this.brain.store.userId, d.operation, target?.id ?? null, JSON.stringify({ ...p, project_id: projectId, target_version: target?.version ?? null, checks: d.checks, kind: p.operation }), statement, p.relation, d.reason, d.risk, p.confidence, cmp.provider, cmp.model, input.source ?? null, input.source_ref ?? null, input.task_id ?? null, nowIso()],
+      `INSERT INTO review_queue(user_id, status, kind, affected_ids, operation, target_memory_id, proposal, statement, relation, reason, risk, confidence, provider, model, source, source_ref, task_id, created_at)
+       VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [this.brain.store.userId, d.operation === "flag_contradiction" ? "conflict" : d.operation === "mark_duplicate" ? "duplicate" : "cortex", JSON.stringify(target ? [target.id] : []), d.operation, target?.id ?? null, JSON.stringify({ ...p, project_id: projectId, target_version: target?.version ?? null, checks: d.checks, kind: p.operation }), statement, p.relation, d.reason, d.risk, p.confidence, cmp.provider, cmp.model, input.source ?? null, input.source_ref ?? null, input.task_id ?? null, nowIso()],
     );
     return r.lastInsertRowid;
   }
@@ -617,7 +638,54 @@ export class Cortex {
     }
   }
 
+  /**
+   * Organises a memory the user already saved (Quick Capture, First Flight): Cortex compares it with what MOTH knows.
+   * Related memories are linked automatically; duplicates and conflicts go to the Memory Inbox. The memory itself
+   * was saved before this runs and is never changed without approval.
+   */
+  async organize(memoryId: string, signal?: AbortSignal): Promise<Row> {
+    const m = this.brain.store.getMemory(memoryId);
+    if (!m || m.status !== "active") return { skipped: "memory no longer active" };
+    const report = await this.learn({ text: m.content, analyze_only: true, project: m.project_id ?? undefined, source: "quick-capture", exclude_ids: [m.id] } as LearnInput, signal);
+    const st = this.brain.store;
+    const actions: Row[] = [];
+    for (const o of report.statements) {
+      if (!o.target || o.target.id === m.id || !st.getMemory(o.target.id)) continue;
+      const target = st.requireMemory(o.target.id);
+      const ctx = this.ctx(`Cortex (${o.model ?? "local model"}) compared your captured memory with "${target.title}"`);
+      if (o.relation === "already_known") {
+        const rid = this.brain.inbox.add({ kind: "duplicate", operation: "merge", statement: m.content, target_memory_id: target.id, affected_ids: [target.id, m.id], reason: `Looks like the same information as "${target.title}". Approve to merge your new note into it (both versions are kept in history).`, risk: "medium", confidence: o.confidence, source: "quick-capture", proposal: { handler: "merge_capture", target_id: target.id, new_id: m.id } });
+        actions.push({ action: "review_duplicate", review_id: rid, target: target.id });
+      } else if (o.relation === "contradiction" || o.relation === "correction") {
+        const rid = this.brain.inbox.add({ kind: "conflict", operation: "supersede", statement: m.content, target_memory_id: target.id, affected_ids: [target.id, m.id], reason: `Your new note may replace or contradict "${target.title}". Approve to mark the old memory as superseded (it is kept in history).`, risk: "high", confidence: o.confidence, source: "quick-capture", proposal: { handler: "supersede_capture", target_id: target.id, new_id: m.id } });
+        actions.push({ action: "review_conflict", review_id: rid, target: target.id });
+      } else if (o.relation === "extends" || o.relation === "historical") {
+        const exists = this.brain.db.value("SELECT 1 FROM memory_relationships WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)", [m.id, target.id, target.id, m.id]);
+        if (!exists) st.link(m.id, target.id, "RELATED_TO", truncate(o.reason || "Related according to Cortex", 300), ctx, { strength: Math.min(0.85, o.confidence ?? 0.5) });
+        actions.push({ action: "linked", target: target.id });
+      }
+    }
+    return { memory_id: m.id, statements: report.statements.length, actions };
+  }
+
+  registerOrganizeHandlers(): void {
+    this.brain.inbox.register("merge_capture", {
+      approve: (item) => {
+        const p = item.proposal as { target_id: string; new_id: string };
+        return { memory_id: this.brain.store.merge(p.target_id, [p.new_id], { actor: "user", reason: "Approved merge of a captured duplicate" }).id };
+      },
+    });
+    this.brain.inbox.register("supersede_capture", {
+      approve: (item) => {
+        const p = item.proposal as { target_id: string; new_id: string };
+        this.brain.store.supersede(p.target_id, p.new_id, { actor: "user", reason: "Approved: the captured memory replaces the older one" });
+        return { memory_id: p.new_id };
+      },
+    });
+  }
+
   registerJobs(): void {
+    this.brain.jobs.register("cortex_organize", async (job, signal) => this.organize(job.payload.memory_id, signal));
     this.brain.jobs.register("cortex_learn", async (job, signal) => this.learn(job.payload as LearnInput, signal));
     this.brain.jobs.register("cortex_context", async (job, signal) => this.intelligentContext(job.payload.query, { project: job.payload.project, synthesize: true, signal }));
     const stateFile = path.join(this.dir, "runtime-state.json");

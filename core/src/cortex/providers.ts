@@ -119,6 +119,7 @@ export class AnthropicCloudProvider implements ModelProvider {
     return `anthropic:${this.store.settings.get("ai.model")}`;
   }
   availability() {
+    if (this.store.settings.get("privacy.mode")) return { ok: false, reason: "Privacy Mode is on: nothing is sent to the cloud" };
     if (!this.store.settings.get("cortex.cloudFallback")) return { ok: false, reason: "Cloud fallback is switched off" };
     return this.ai.available();
   }

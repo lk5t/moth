@@ -15,6 +15,13 @@ export interface SearchFilters {
   until?: string | null;
   status?: "active" | "all" | "archived";
   related_to?: string | null; // only memories within 2 hops of this memory
+  memory_type?: string | null;
+  memory_types?: string[];
+  source?: string | null;
+  pinned?: boolean;
+  min_confidence?: number | null;
+  /** Hide memories of private projects, except this project (the one being worked on). */
+  hide_private_except?: string | null;
 }
 
 export interface ScoredMemory {
@@ -65,6 +72,10 @@ export class SearchEngine {
 
   get db(): Database {
     return this.store.db;
+  }
+
+  privateProjects(): Set<string> {
+    return new Set(this.db.all<Row>("SELECT id FROM projects WHERE user_id = ? AND private = 1", [this.store.userId]).map((r) => r.id as string));
   }
 
   resetCache(): void {
@@ -208,6 +219,13 @@ export class SearchEngine {
       if (filters.since && m.updated_at < filters.since) continue;
       if (filters.until && m.updated_at > filters.until) continue;
       if (relatedSet && !relatedSet.has(m.id)) continue;
+      if (filters.memory_type && m.memory_type !== filters.memory_type) continue;
+      if (filters.memory_types?.length && !filters.memory_types.includes(m.memory_type)) continue;
+      if (filters.source && m.source !== filters.source) continue;
+      if (filters.pinned && !m.pinned) continue;
+      if (typeof filters.min_confidence === "number" && m.confidence < filters.min_confidence) continue;
+      if (filters.hide_private_except !== undefined && m.project_id && m.project_id !== filters.hide_private_except && this.privateProjects().has(m.project_id)) continue;
+      if (m.scope === "private" && filters.hide_private_except !== undefined && m.project_id !== filters.hide_private_except) continue;
 
       const ageDays = (now - Date.parse(m.updated_at)) / 86_400_000;
       const signals = {
@@ -226,6 +244,8 @@ export class SearchEngine {
         WEIGHTS.semantic * signals.semantic + WEIGHTS.keyword * signals.keyword + WEIGHTS.project * signals.project + WEIGHTS.graph * signals.graph +
         WEIGHTS.importance * signals.importance + WEIGHTS.recency * signals.recency + WEIGHTS.confidence * signals.confidence;
       score += 0.04 * (fb.get(m.id) ?? 0);
+      // Pinned memories get a small priority boost; it never outweighs real relevance or newer evidence.
+      if (m.pinned) score += 0.03;
       if (m.flags.includes("possible_prompt_injection")) score *= 0.7;
       if (m.verification === "disputed") score *= 0.8;
       score = Math.min(1, score);
@@ -238,6 +258,7 @@ export class SearchEngine {
       if (signals.recency > 0.8) why.push("recent");
       if (m.importance >= 0.75) why.push("important");
       if ((fb.get(m.id) ?? 0) > 0) why.push("marked useful before");
+      if (m.pinned) why.push("pinned");
       out.push({ memory: m, score: Math.round(score * 1000) / 1000, signals, why });
     }
     out.sort((a, b) => b.score - a.score);

@@ -82,11 +82,11 @@ async function startClient(dataDir: string): Promise<McpClient> {
   return c;
 }
 
-test("MCP: lists all 19 tools with schemas", async () => {
+test("MCP: lists all 24 tools with schemas", async () => {
   const c = await startClient(tmpDir());
   const r = await c.request("tools/list");
   const names = r.result.tools.map((t: any) => t.name).sort();
-  assert.equal(names.length, 19);
+  assert.equal(names.length, 24);
   for (const t of r.result.tools) {
     assert.equal(t.inputSchema.type, "object");
     assert.ok(t.description.length > 20);
@@ -212,4 +212,54 @@ test("MCP: merge and link tools", async () => {
   const rc = await c.call("moth_get_relevant_context", { query: "how does luck work" });
   assert.ok(rc.data.stats.items >= 1);
   await c.close();
+});
+
+test("MCP v0.2.5: preferences, research with sources, lessons and knowledge transfer over real MCP calls", async () => {
+  const dir = tmpDir();
+  const c = await startClient(dir);
+  const pref = await c.call("moth_record_preference", { content: "Prefers modular Roblox scripts and testing after each feature", explicit: true, area: "workflow" });
+  assert.equal(pref.isError, false, JSON.stringify(pref.data));
+  assert.equal(pref.data.status, "confirmed");
+  const inferred = await c.call("moth_record_preference", { content: "Seems to like neon colours in menus", explicit: false });
+  assert.equal(inferred.data.status, "tentative");
+
+  const research = await c.call("moth_submit_research", {
+    topic: "How to get more players on a Roblox game",
+    domain: "Roblox / Game Design / Retention",
+    project: "Cursed RNG",
+    findings: [
+      { insight: "Research suggests a clear, engaging introduction helps new players understand the goal and keep playing.", basis: "evidence", sources: [{ url: "https://example.org/roblox-onboarding", title: "Onboarding guide", retrieved_at: "2026-10-23" }] },
+      { insight: "Adding a leaderboard probably helps retention.", basis: "evidence" },
+    ],
+  });
+  assert.equal(research.isError, false, JSON.stringify(research.data));
+  assert.equal(research.data.stored.length, 1);
+  assert.equal(research.data.needs_review.length, 1);
+
+  const lesson = await c.call("moth_record_lesson", { problem: "Inventory trusted client-reported quantities", correction: "Server validates inventory changes", lesson: "Validate important inventory changes on the server instead of trusting the client", verified: true, project: "Cursed RNG", scope: "global" });
+  assert.equal(lesson.data.stored, true);
+
+  const begin = await c.call("moth_begin_task", { task: "Start a new Roblox simulator project called Pet Valley with an inventory and a good first-time player experience", project: "Pet Valley" });
+  assert.equal(begin.isError, false, JSON.stringify(begin.data));
+  const insights = await c.call("moth_commit_learning", { summary: "Started Pet Valley", project: "Pet Valley", project_status: "Roblox pet simulator with inventory; early retention matters" });
+  assert.equal(insights.isError, false, JSON.stringify(insights.data));
+  const tr = await c.call("moth_get_project_insights", { project: "Pet Valley", focus: "inventory and first-time player experience in a Roblox simulator" });
+  assert.equal(tr.isError, false, JSON.stringify(tr.data));
+  const types = tr.data.items.map((i: any) => i.memory_type);
+  assert.ok(types.includes("lesson"), JSON.stringify(tr.data.items));
+  assert.ok(types.includes("research"), JSON.stringify(tr.data.items));
+  const prefs = await c.call("moth_get_preferences", { task: "Write the pet inventory script" });
+  assert.ok(prefs.data.preferences.some((p: any) => /modular Roblox scripts/.test(p.preference)));
+  assert.ok(!prefs.data.preferences.some((p: any) => /neon/.test(p.preference)), "a single inference is not used yet");
+  await c.close();
+
+  // Privacy Mode (set in the app) blocks Claude's automatic capture.
+  const b = Brain.open({ dataDir: dir, role: "test" });
+  b.setPrivacyMode(true);
+  b.close();
+  const c2 = await startClient(dir);
+  const blocked = await c2.call("moth_submit_research", { topic: "anything", findings: [{ insight: "This should not be saved while private.", basis: "speculation" }] });
+  assert.equal(blocked.isError, true);
+  assert.match(JSON.stringify(blocked.data), /Privacy Mode/);
+  await c2.close();
 });

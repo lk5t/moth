@@ -58,12 +58,22 @@ async function serve(args: string[]): Promise<void> {
   log.info(`API ready on 127.0.0.1:${api.port}`);
   if (flag(args, "static")) process.stderr.write(`\nOpen MOTH: http://127.0.0.1:${api.port}/#token=${api.token}\n\n`);
 
+  let closing = false;
   const shutdown = async (why: string) => {
+    if (closing) return;
+    closing = true;
     log.info(`Shutting down (${why})`);
+    const hard = setTimeout(() => process.exit(0), 15_000);
     try {
+      if (httpMcp) await new Promise((r) => httpMcp!.close(() => r(null)));
       await api.close();
-      brain.close();
+      const r = await brain.shutdownGracefully();
+      log.info(`Clean shutdown: ${JSON.stringify(r)}`);
+      process.stdout.write(`MOTH_STOPPED ${JSON.stringify(r)}\n`);
+    } catch (e) {
+      log.error("shutdown error", e);
     } finally {
+      clearTimeout(hard);
       process.exit(0);
     }
   };
@@ -77,6 +87,14 @@ async function serve(args: string[]): Promise<void> {
           for (const [k, v] of Object.entries(msg.values)) Secrets.set(k, typeof v === "string" ? v : null);
           brain.refreshEmbeddingProvider();
           log.info(`Received ${Object.keys(msg.values).length} secret(s) from the desktop shell`);
+        } else if (msg.type === "system") {
+          // Windows idle time and power state from the desktop shell (used by the Sleep Cycle and resource profiles).
+          brain.system = {
+            idleSeconds: Number.isFinite(msg.idle_seconds) ? Number(msg.idle_seconds) : null,
+            onBattery: typeof msg.on_battery === "boolean" ? msg.on_battery : null,
+            batterySaver: typeof msg.battery_saver === "boolean" ? msg.battery_saver : null,
+            updatedAt: Date.now(),
+          };
         } else if (msg.type === "shutdown") void shutdown("requested");
       } catch {
         /* ignore malformed lines */

@@ -39,6 +39,7 @@ export class AnthropicClient {
     if (!s.get("ai.disclosureAccepted")) return { ok: false, reason: "External AI processing has not been approved yet" };
     if (!Secrets.has("anthropic_api_key")) return { ok: false, reason: "No Anthropic API key is set" };
     if (s.get("automation.paused")) return { ok: false, reason: "Automation is paused" };
+    if (s.get("privacy.mode")) return { ok: false, reason: "Privacy Mode is on: nothing is sent to the cloud" };
     return { ok: true };
   }
 

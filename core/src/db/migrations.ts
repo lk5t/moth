@@ -378,6 +378,133 @@ CREATE TABLE ai_components (
 );
 `,
   },
+  {
+    version: 3,
+    name: "v0.2.5 first flight & adaptation: memory types, scope, pinning, provenance, preferences, lessons, knowledge transfer, inbox",
+    sql: `
+-- Additive only: existing rows keep working; new columns get safe defaults and are backfilled below.
+ALTER TABLE memories ADD COLUMN memory_type TEXT NOT NULL DEFAULT 'semantic'
+  CHECK (memory_type IN ('episodic','semantic','procedural','project','preference','research','lesson'));
+ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'global' CHECK (scope IN ('global','project','private'));
+ALTER TABLE memories ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memories ADD COLUMN domain TEXT NOT NULL DEFAULT '';
+ALTER TABLE memories ADD COLUMN evidence TEXT CHECK (evidence IS NULL OR evidence IN ('sourced','unsourced','speculative'));
+
+UPDATE memories SET memory_type = CASE
+  WHEN category = 'project' THEN 'project'
+  WHEN category = 'preference' THEN 'preference'
+  WHEN category = 'research' THEN 'research'
+  WHEN category = 'solution' THEN 'procedural'
+  WHEN category IN ('task','error') THEN 'episodic'
+  WHEN category = 'decision' AND project_id IS NOT NULL THEN 'project'
+  ELSE 'semantic' END;
+UPDATE memories SET scope = CASE WHEN project_id IS NULL THEN 'global' ELSE 'project' END;
+CREATE INDEX idx_memories_type ON memories(user_id, memory_type, status);
+CREATE INDEX idx_memories_pinned ON memories(user_id, pinned) WHERE pinned = 1;
+
+DROP TRIGGER trg_mem_upd;
+CREATE TRIGGER trg_mem_upd AFTER UPDATE ON memories
+  WHEN OLD.title IS NOT NEW.title OR OLD.content IS NOT NEW.content OR OLD.status IS NOT NEW.status
+    OR OLD.category IS NOT NEW.category OR OLD.importance IS NOT NEW.importance OR OLD.project_id IS NOT NEW.project_id
+    OR OLD.summary IS NOT NEW.summary OR OLD.tags IS NOT NEW.tags OR OLD.task_state IS NOT NEW.task_state
+    OR OLD.pinned IS NOT NEW.pinned OR OLD.memory_type IS NOT NEW.memory_type OR OLD.scope IS NOT NEW.scope
+BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('memory', NEW.id, 'update');
+END;
+
+-- Projects: knowledge transfer can be switched off, and private projects never leak into other contexts.
+ALTER TABLE projects ADD COLUMN transfer_enabled INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE projects ADD COLUMN private INTEGER NOT NULL DEFAULT 0;
+
+-- Provenance for research and any other sourced memory. URLs are stored exactly as submitted; never invented.
+CREATE TABLE memory_sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  url TEXT,
+  title TEXT NOT NULL DEFAULT '',
+  publisher TEXT NOT NULL DEFAULT '',
+  published_at TEXT,
+  retrieved_at TEXT,
+  excerpt TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'citation' CHECK (kind IN ('citation','file','conversation','import')),
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_sources_memory ON memory_sources(memory_id);
+
+-- Adaptation profile: preferences are memories (memory_type 'preference') plus this metadata,
+-- so they get versions, search, The Mind and undo for free.
+CREATE TABLE preference_meta (
+  memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+  area TEXT NOT NULL DEFAULT 'other' CHECK (area IN ('coding','tools','ui','workflow','communication','requirement','instruction','lesson','other')),
+  status TEXT NOT NULL DEFAULT 'tentative' CHECK (status IN ('confirmed','tentative','rejected','outdated')),
+  explicit INTEGER NOT NULL DEFAULT 0,
+  evidence_count INTEGER NOT NULL DEFAULT 1,
+  last_confirmed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE preference_evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  observation TEXT NOT NULL,
+  source TEXT NOT NULL,
+  task_id TEXT,
+  project_id TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_pref_ev ON preference_evidence(memory_id);
+CREATE TRIGGER trg_pref_upd AFTER UPDATE ON preference_meta BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('memory', NEW.memory_id, 'update');
+END;
+
+-- Lessons learned from verified corrections.
+CREATE TABLE lesson_meta (
+  memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+  problem TEXT NOT NULL,
+  correction TEXT NOT NULL,
+  evidence TEXT NOT NULL DEFAULT '',
+  verified INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revised','rejected')),
+  created_at TEXT NOT NULL
+);
+
+-- Knowledge transfer suggestions shown in a project space ("3 previous insights may help").
+CREATE TABLE transfer_suggestions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  reason TEXT NOT NULL,
+  score REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','dismissed','accepted')),
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  UNIQUE (project_id, memory_id)
+);
+CREATE TRIGGER trg_transfer_ins AFTER INSERT ON transfer_suggestions BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('transfer', CAST(NEW.id AS TEXT), 'insert');
+END;
+
+-- Unified Memory Inbox: the review queue gains a kind, defer, affected memories and sources.
+ALTER TABLE review_queue ADD COLUMN kind TEXT NOT NULL DEFAULT 'cortex';
+ALTER TABLE review_queue ADD COLUMN deferred_until TEXT;
+ALTER TABLE review_queue ADD COLUMN affected_ids TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE review_queue ADD COLUMN sources TEXT NOT NULL DEFAULT '[]';
+CREATE TRIGGER trg_review_defer AFTER UPDATE OF deferred_until ON review_queue BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('review', CAST(NEW.id AS TEXT), 'update');
+END;
+
+-- Files picked up from the Claude Inbox folder (content hash prevents duplicates).
+CREATE TABLE inbox_files (
+  hash TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('imported','learned','queued','skipped','failed')),
+  memory_ids TEXT NOT NULL DEFAULT '[]',
+  detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+`,
+  },
 ];
 
 export function runMigrations(db: Database): void {

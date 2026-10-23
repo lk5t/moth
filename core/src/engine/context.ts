@@ -18,6 +18,10 @@ export interface ContextItem {
   why: string[];
   flags: string[];
   task_state?: string | null;
+  memory_type: string;
+  source: string;
+  confidence: number;
+  pinned: boolean;
 }
 
 export interface ContextPackage {
@@ -48,6 +52,10 @@ function toItem(store: MemoryStore, s: { memory: Memory; score: number; why: str
     why: s.why,
     flags: m.flags,
     task_state: m.task_state,
+    memory_type: m.memory_type,
+    source: m.source,
+    confidence: m.confidence,
+    pinned: m.pinned,
   };
 }
 
@@ -120,7 +128,8 @@ export async function buildContext(
   }
 
   const projectNames = new Map(store.listProjects(true).map((p) => [p.id, p.name]));
-  const scored = await search.hybrid(query, {}, { limit: 60, minScore, boostProjectId: project?.id ?? null, seedIds: project?.hub_memory_id ? [project.hub_memory_id] : [] });
+  // Private projects never leak into other contexts; preferences arrive through their own section.
+  const scored = await search.hybrid(query, { hide_private_except: project?.id ?? null }, { limit: 60, minScore, boostProjectId: project?.id ?? null, seedIds: project?.hub_memory_id ? [project.hub_memory_id] : [] });
 
   // Within a project, pull its key structured knowledge even if wording differs from the query.
   const extra: ScoredMemory[] = [];
@@ -143,6 +152,7 @@ export async function buildContext(
   const all = [...scored, ...extra]
     .filter((s) => !project || !s.memory.project_id || s.memory.project_id === project.id || s.score >= 0.6)
     .filter((s) => s.memory.category !== "project" || s.memory.id !== project?.hub_memory_id)
+    .filter((s) => s.memory.memory_type !== "preference")
     .sort((a, b) => b.score - a.score);
 
   const sections: ContextPackage["sections"] = { decisions: [], open_tasks: [], errors_and_solutions: [], relevant: [] };

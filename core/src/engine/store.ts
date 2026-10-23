@@ -8,8 +8,8 @@ import { LIMITS, sanitizeTags, sanitizeText } from "./security.ts";
 import type { SettingsStore } from "./settings.ts";
 import { deriveTitle, hashText, keywords, slugify, summarize, uniq } from "./text.ts";
 import {
-  CATEGORIES, MothError, RELATION_TYPES,
-  type Actor, type Category, type ChangeContext, type Memory, type MemoryInput, type Project, type Relationship, type RelationType,
+  CATEGORIES, MEMORY_TYPES, MothError, RELATION_TYPES, SCOPES,
+  type Actor, type Category, type ChangeContext, type Memory, type MemoryInput, type MemoryType, type Project, type Relationship, type RelationType,
 } from "./types.ts";
 
 export const newId = (prefix: string): string => `${prefix}_${Date.now().toString(36)}${crypto.randomBytes(5).toString("hex")}`;
@@ -29,6 +29,19 @@ export function classify(text: string): Category {
   if (/\b(prefers?|likes it when|wants me to|always wants|never wants)\b/.test(t)) return "preference";
   if (/\b(research|paper|study|benchmark|according to)\b/.test(t)) return "research";
   return "fact";
+}
+
+/** Default memory type for a category (users and Claude can override it). */
+export function typeFor(category: Category, projectId: string | null | undefined): MemoryType {
+  switch (category) {
+    case "project": return "project";
+    case "preference": return "preference";
+    case "research": return "research";
+    case "solution": return "procedural";
+    case "task": case "error": return "episodic";
+    case "decision": return projectId ? "project" : "semantic";
+    default: return "semantic";
+  }
 }
 
 export interface RecordEventInput {
@@ -66,6 +79,7 @@ export class MemoryStore {
       flags: safeJson(r.flags as string, []),
       manual_lock: !!r.manual_lock,
       is_demo: !!r.is_demo,
+      pinned: !!r.pinned,
       importance: Number(r.importance),
       confidence: Number(r.confidence),
       version: Number(r.version),
@@ -80,6 +94,8 @@ export class MemoryStore {
       files: safeJson(r.files as string, []),
       archived: !!r.archived,
       is_demo: !!r.is_demo,
+      transfer_enabled: r.transfer_enabled === undefined ? true : !!r.transfer_enabled,
+      private: !!r.private,
     };
   }
 
@@ -106,6 +122,7 @@ export class MemoryStore {
 
   listMemories(f: {
     status?: string; category?: string; project_id?: string; tag?: string; since?: string; until?: string;
+    memory_type?: string; source?: string; pinned?: boolean; min_confidence?: number; scope?: string;
     limit?: number; offset?: number; order?: "updated" | "created" | "importance" | "title"; include_demo?: boolean;
   } = {}): { items: Memory[]; total: number } {
     const where = ["user_id = :uid"];
@@ -116,7 +133,12 @@ export class MemoryStore {
     if (f.tag) { where.push("EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE value = :tag)"); p.tag = f.tag; }
     if (f.since) { where.push("updated_at >= :since"); p.since = f.since; }
     if (f.until) { where.push("updated_at <= :until"); p.until = f.until; }
-    const order = { updated: "updated_at DESC", created: "created_at DESC", importance: "importance DESC, updated_at DESC", title: "title COLLATE NOCASE ASC" }[f.order ?? "updated"];
+    if (f.memory_type) { where.push("memory_type = :mtype"); p.mtype = f.memory_type; }
+    if (f.source) { where.push("source = :source"); p.source = f.source; }
+    if (f.scope) { where.push("scope = :scope"); p.scope = f.scope; }
+    if (f.pinned) where.push("pinned = 1");
+    if (typeof f.min_confidence === "number") { where.push("confidence >= :minc"); p.minc = f.min_confidence; }
+    const order = { updated: "pinned DESC, updated_at DESC", created: "created_at DESC", importance: "importance DESC, updated_at DESC", title: "title COLLATE NOCASE ASC" }[f.order ?? "updated"];
     const limit = Math.min(Math.max(f.limit ?? 100, 1), 1000);
     const total = Number(this.db.value(`SELECT COUNT(*) FROM memories WHERE ${where.join(" AND ")}`, p) ?? 0);
     const rows = this.db.all(`SELECT * FROM memories WHERE ${where.join(" AND ")} ORDER BY ${order} LIMIT ${limit} OFFSET ${Math.max(0, f.offset ?? 0)}`, p);
@@ -152,7 +174,11 @@ export class MemoryStore {
     const category = input.category ?? existing?.category ?? classify(`${title}\n${content}`);
     if (!CATEGORIES.includes(category)) throw new MothError("invalid_input", `category must be one of: ${CATEGORIES.join(", ")}`);
     const tags = input.tags !== undefined ? sanitizeTags(input.tags) : existing?.tags ?? [];
-    return { title, content, summary, category, tags, flags };
+    const memory_type = input.memory_type ?? (input.category !== undefined && input.category !== existing?.category ? typeFor(category, input.project_id ?? existing?.project_id) : existing?.memory_type) ?? typeFor(category, input.project_id);
+    if (!MEMORY_TYPES.includes(memory_type)) throw new MothError("invalid_input", `memory_type must be one of: ${MEMORY_TYPES.join(", ")}`);
+    if (input.scope !== undefined && !SCOPES.includes(input.scope)) throw new MothError("invalid_input", `scope must be one of: ${SCOPES.join(", ")}`);
+    const domain = input.domain !== undefined ? sanitizeText(input.domain ?? "", "domain", 200, { redact: false, flagInjection: false }).text.replace(/\n/g, " ") : existing?.domain ?? "";
+    return { title, content, summary, category, tags, flags, memory_type, domain };
   }
 
   private snapshot(m: Memory, changedBy: Actor, changeType: string, reason: string): void {
@@ -186,8 +212,10 @@ export class MemoryStore {
     return this.db.tx(() => {
       this.db.run(
         `INSERT INTO memories(id, user_id, title, content, summary, category, tags, source, source_ref, source_timestamp, project_id,
-          created_at, updated_at, importance, confidence, verification, status, version, manual_lock, task_state, flags, is_demo)
-         VALUES (:id,:uid,:title,:content,:summary,:category,:tags,:source,:source_ref,:source_ts,:project_id,:t,:t,:importance,:confidence,:verification,'active',1,:lock,:task_state,:flags,:demo)`,
+          created_at, updated_at, importance, confidence, verification, status, version, manual_lock, task_state, flags, is_demo,
+          memory_type, scope, pinned, domain, evidence)
+         VALUES (:id,:uid,:title,:content,:summary,:category,:tags,:source,:source_ref,:source_ts,:project_id,:t,:t,:importance,:confidence,:verification,'active',1,:lock,:task_state,:flags,:demo,
+          :mtype,:scope,:pinned,:domain,:evidence)`,
         {
           id, uid: this.userId, title: c.title, content: c.content, summary: c.summary, category: c.category, tags: JSON.stringify(c.tags),
           source: input.source ?? (ctx.actor === "user" ? "user" : ctx.actor === "claude" ? "claude" : "moth"),
@@ -196,6 +224,8 @@ export class MemoryStore {
           lock: ctx.actor === "user" ? 1 : 0,
           task_state: c.category === "task" ? (input.task_state ?? "open") : null,
           flags: JSON.stringify(uniq(c.flags)), demo: input.is_demo ? 1 : 0,
+          mtype: c.memory_type, scope: input.scope ?? (input.project_id ? "project" : "global"), pinned: input.pinned ? 1 : 0,
+          domain: c.domain, evidence: input.evidence ?? null,
         },
       );
       const m = this.requireMemory(id);
@@ -245,6 +275,7 @@ export class MemoryStore {
       this.db.run(
         `UPDATE memories SET title=:title, content=:content, summary=:summary, category=:category, tags=:tags, project_id=:pid,
            importance=:imp, confidence=:conf, verification=:ver, status=:status, task_state=:ts, flags=:flags,
+           memory_type=:mtype, scope=:scope, pinned=:pinned, domain=:domain, evidence=:evidence,
            manual_lock = CASE WHEN :lock = 1 THEN 1 ELSE manual_lock END,
            archived_at = CASE WHEN :status = 'active' THEN NULL WHEN status = 'active' AND :status <> 'active' THEN :t ELSE archived_at END,
            version = version + 1, updated_at = :t
@@ -254,6 +285,9 @@ export class MemoryStore {
           imp: importance, conf: confidence, ver: patch.verification ?? (ctx.actor === "user" && changesText ? "user_confirmed" : before.verification),
           status, ts: c.category === "task" ? (patch.task_state ?? before.task_state ?? "open") : null, flags: JSON.stringify(flags),
           lock: ctx.actor === "user" && changesText ? 1 : 0, t,
+          mtype: c.memory_type, domain: c.domain, evidence: patch.evidence !== undefined ? patch.evidence : before.evidence,
+          pinned: patch.pinned !== undefined ? (patch.pinned ? 1 : 0) : before.pinned ? 1 : 0,
+          scope: patch.scope ?? (patch.project_id !== undefined && before.scope !== "private" ? (projectId ? "project" : "global") : before.scope),
         },
       );
       const after = this.requireMemory(id);
@@ -534,14 +568,14 @@ export class MemoryStore {
     });
   }
 
-  updateProject(id: string, patch: Partial<Pick<Project, "name" | "description" | "goals" | "status" | "aliases" | "files" | "archived">>, ctx: ChangeContext): Project {
+  updateProject(id: string, patch: Partial<Pick<Project, "name" | "description" | "goals" | "status" | "aliases" | "files" | "archived" | "transfer_enabled" | "private">>, ctx: ChangeContext): Project {
     const p = this.requireProject(id);
     const next = { ...p, ...patch };
     const t = nowIso();
     this.db.tx(() => {
       this.db.run(
-        "UPDATE projects SET name=?, description=?, goals=?, status=?, aliases=?, files=?, archived=?, updated_at=?, last_activity_at=? WHERE id=?",
-        [next.name, next.description, next.goals, next.status, JSON.stringify(next.aliases), JSON.stringify(uniq(next.files).slice(-200)), next.archived ? 1 : 0, t, t, p.id],
+        "UPDATE projects SET name=?, description=?, goals=?, status=?, aliases=?, files=?, archived=?, transfer_enabled=?, private=?, updated_at=?, last_activity_at=? WHERE id=?",
+        [next.name, next.description, next.goals, next.status, JSON.stringify(next.aliases), JSON.stringify(uniq(next.files).slice(-200)), next.archived ? 1 : 0, next.transfer_enabled ? 1 : 0, next.private ? 1 : 0, t, t, p.id],
       );
       if (p.hub_memory_id && (patch.description !== undefined || patch.goals !== undefined || patch.status !== undefined || patch.name !== undefined)) {
         const content = [next.description || `Project "${next.name}".`, next.goals ? `Goals: ${next.goals}` : "", next.status ? `Current state: ${next.status}` : ""].filter(Boolean).join("\n\n");
