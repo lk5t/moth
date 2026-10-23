@@ -5,6 +5,7 @@ import { ContextMenu, Input, Select, Slider, Switch, Tabs } from "../components/
 import { GraphCanvas, type GraphHandle, type GraphNodeData, type GraphSettings } from "../graph/GraphCanvas";
 import { onChanges, rpc } from "../lib/api";
 import { useApp } from "../lib/app";
+import { useMotion } from "../lib/motion";
 import { CATEGORY_COLOR, CATEGORY_LABEL, MEMORY_TYPE_LABEL, RELATION_LABEL, SOURCE_LABEL, cn, debounce } from "../lib/utils";
 
 export type FullGraphSettings = GraphSettings & { showOrphans: boolean; showArchived: boolean; recentDays: number; categories: string[]; projects: string[]; tags: string[]; localDepth: number };
@@ -40,6 +41,7 @@ export function MindPage() {
   const [bloom, setBloom] = useState<Map<string, number>>(new Map());
   const [allTags, setAllTags] = useState<{ tag: string; n: number }[]>([]);
   const [scope, setScope] = useState<string>(params.project ?? "");
+  const motion = useMotion();
   const graph = useRef<GraphHandle>(null);
   useEffect(() => {
     if (params.project) {
@@ -77,18 +79,32 @@ export function MindPage() {
   );
   useEffect(() => void load(), [load]);
 
-  // Live evolution: real database changes (from Claude via MCP, or the background engine) update the graph.
+  // Live evolution: real database changes (from Claude via MCP, Cortex, the Claude Inbox or the user) animate
+  // the graph. Nothing here is simulated: every effect is triggered by a row in the change feed.
   useEffect(() => {
     let t: ReturnType<typeof setTimeout> | undefined;
+    let learned = 0;
+    let toastTimer: ReturnType<typeof setTimeout> | undefined;
     return onChanges((changes) => {
       const created = changes.filter((c) => c.entity === "memory" && c.op === "insert").map((c) => c.id);
-      const linked = changes.filter((c) => c.entity === "relationship" && c.op === "insert").length;
-      if (created.length) setBloom((b) => new Map([...b, ...created.map((id) => [id, performance.now() + 250] as [string, number])]));
+      const updated = changes.filter((c) => c.entity === "memory" && c.op === "update").map((c) => c.id).filter((id) => !created.includes(id));
+      const linked = changes.filter((c) => c.entity === "relationship" && c.op === "insert").map((c) => c.id);
+      if (created.length) graph.current?.markNew(created);
+      if (linked.length) graph.current?.markNewLinks(linked);
+      if (updated.length) graph.current?.pulse(updated);
       if (changes.some((c) => c.entity === "memory" || c.entity === "relationship")) {
         if (t) clearTimeout(t);
         t = setTimeout(() => void load(), 200);
       }
-      if (created.length && linked) toast({ kind: "light", text: created.length === 1 ? "A new memory joined the Mind" : `${created.length} new memories joined the Mind` });
+      // Heartbeat: one quiet notice per burst of real learning.
+      if (created.length) {
+        learned += created.length;
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => {
+          toast({ kind: "light", text: learned === 1 ? "1 memory learned" : `${learned} memories learned` });
+          learned = 0;
+        }, 900);
+      }
     });
   }, [load, toast]);
 
@@ -125,11 +141,11 @@ export function MindPage() {
           settings={settings}
           selectedId={selected}
           highlight={highlight}
-          bloom={bloom}
           projectColors={projectColors}
+          motion={motion}
           onSelect={(id) => select(id)}
           onFocus={(id) => {
-            graph.current?.focus(id);
+            graph.current?.focus(id, 2);
             select(id);
           }}
           onContext={(id, x, y) => setMenu({ id, x, y })}

@@ -7,6 +7,7 @@ import { useLive } from "../lib/hooks";
 import { getAutostart, keyringGet, keyringSet, openExternal, pickFiles, pickFolder, revealPath, saveSecret, setAutostart, setCaptureShortcut, setKeepInTray, shellInfo } from "../lib/tauri";
 import { cn, timeAgo } from "../lib/utils";
 import { useGraphSettings } from "./Mind";
+import { setMotionSetting } from "../lib/motion";
 
 const SECTIONS = [
   ["general", "General"],
@@ -165,8 +166,22 @@ function General({ s, set, onRestartFirstFlight }: SP & { onRestartFirstFlight?:
             <option value="silent">Silent</option>
           </Select>
         </Line>
-        <Line label="Reduce motion" hint="Turns off graph animation and transitions.">
-          <Switch checked={s["appearance.reduceMotion"]} onChange={(v) => (document.documentElement.classList.toggle("reduce-motion", v), set("appearance.reduceMotion", v))} label="Reduce motion" />
+        <Line label="Motion" hint={s["appearance.motion"] === "full" ? "All animations, glow and a gentle shimmer in The Mind." : s["appearance.motion"] === "minimal" ? "Essential feedback only: no glow animation, instant transitions." : s["appearance.motion"] === "balanced" ? "Subtle glow and smooth interactions, no ambient effects." : "Balanced, or Minimal when Windows is set to reduce animations."}>
+          <Select
+            value={s["appearance.reduceMotion"] ? "minimal" : s["appearance.motion"]}
+            onChange={async (e) => {
+              const v = e.target.value as any;
+              setMotionSetting(v, false);
+              await set("appearance.reduceMotion", false);
+              await set("appearance.motion", v);
+            }}
+            aria-label="Motion"
+          >
+            <option value="auto">Automatic</option>
+            <option value="full">Full</option>
+            <option value="balanced">Balanced</option>
+            <option value="minimal">Minimal</option>
+          </Select>
         </Line>
       </Block>
       <Block title="Updates">

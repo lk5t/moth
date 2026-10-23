@@ -78,6 +78,8 @@ export const DEFAULT_SETTINGS = {
   "notifications.learning": true,
   "updates.check": true,
   "appearance.reduceMotion": false,
+  /** auto = Balanced, or Minimal when Windows asks apps to reduce motion. */
+  "appearance.motion": "auto" as "auto" | "full" | "balanced" | "minimal",
   "appearance.sidebarCollapsed": false,
   "appearance.contextPanel": true,
   "app.launchOnStartup": false,

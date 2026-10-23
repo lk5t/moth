@@ -8,6 +8,7 @@ import { NAV, Sidebar, TitleBar, Toasts } from "./components/Shell";
 import { Button, Dialog } from "./components/ui";
 import { onChanges, rpc } from "./lib/api";
 import { AppProvider, useApp, type Page } from "./lib/app";
+import { setMotionSetting } from "./lib/motion";
 import { notify, onShellEvent, setCaptureShortcut, setKeepInTray, trayRefresh } from "./lib/tauri";
 import { AdaptationPage } from "./pages/Adaptation";
 import { ConnectionsPage } from "./pages/Connections";
@@ -42,7 +43,7 @@ function Root() {
   const load = () =>
     rpc<any>("settings.get")
       .then((r) => {
-        document.documentElement.classList.toggle("reduce-motion", !!r.settings["appearance.reduceMotion"]);
+        setMotionSetting(r.settings["appearance.motion"], !!r.settings["appearance.reduceMotion"]);
         void setKeepInTray(r.settings["app.closeToTray"] !== false);
         if (r.settings["quickCapture.enabled"])
           void setCaptureShortcut(r.settings["quickCapture.shortcut"] || null).then((err) => {
@@ -162,7 +163,10 @@ function Workspace({ firstMemory, onRestartFirstFlight }: { firstMemory?: string
   useEffect(() => {
     void rpc<any>("notifications.since", { after_id: 1e15 }).then((r) => (lastNotification.current = r.latest)).catch(() => undefined);
     return onChanges((changes) => {
-      if (changes.some((c) => c.entity === "settings")) void trayRefresh();
+      if (changes.some((c) => c.entity === "settings")) {
+        void trayRefresh();
+        if (changes.some((c) => c.entity === "settings" && String(c.id).startsWith("appearance."))) void rpc<any>("settings.get").then((r) => setMotionSetting(r.settings["appearance.motion"], !!r.settings["appearance.reduceMotion"]));
+      }
       if (!changes.some((c) => c.entity === "activity")) return;
       if (lastNotification.current === null) return;
       void rpc<any>("notifications.since", { after_id: lastNotification.current }).then((r) => {
