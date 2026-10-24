@@ -14,7 +14,7 @@ import { truncate } from "../engine/text.ts";
 import { CATEGORIES, MothError, RELATION_TYPES } from "../engine/types.ts";
 import { log } from "../logger.ts";
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.3.1";
 
 export const SERVER_INSTRUCTIONS = `MOTH is the user's long-term memory ("second brain") for Claude.
 Workflow for every substantial task:

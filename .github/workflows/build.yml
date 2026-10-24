@@ -179,6 +179,23 @@ jobs:
           Write-Host "Quit completely: no MOTH, engine or model processes left; engine shut down cleanly."
           if ($engines -gt 1) { throw "a second launch started another memory engine ($engines running)" }
 
+          # Update while Claude is using MOTH: Claude keeps its own moth-core.exe (MCP over stdin) running from
+          # the install folder. Re-installing must still succeed and replace the file (real failure seen on a PC).
+          $psi = New-Object System.Diagnostics.ProcessStartInfo $core, "mcp"
+          $psi.UseShellExecute = $false; $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+          $mcp = [System.Diagnostics.Process]::Start($psi)
+          Start-Sleep -Seconds 3
+          if ($mcp.HasExited) { throw "the simulated Claude MCP server did not stay running" }
+          $before = (Get-Item $core).LastWriteTimeUtc
+          (Get-Item $core).LastWriteTimeUtc = $before.AddDays(-1)
+          $up = Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait -PassThru
+          Write-Host "Update installer exit code: $($up.ExitCode)"
+          if ($up.ExitCode -ne 0) { throw "updating while Claude's MOTH server was running failed (exit $($up.ExitCode))" }
+          if ((Get-Item $core).LastWriteTimeUtc -le $before.AddDays(-1)) { throw "moth-core.exe was not replaced by the update" }
+          & $core self-test
+          if ($LASTEXITCODE -ne 0) { throw "MCP self-test failed after updating" }
+          Write-Host "Update succeeded while Claude's MOTH server was running; the new server passes its self-test."
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
