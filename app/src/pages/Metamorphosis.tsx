@@ -1,3 +1,4 @@
+import { JOB_STATUS_LABEL } from "../lib/utils";
 import { Pause, Play, Sparkles, Undo2 } from "lucide-react";
 import { useState } from "react";
 import { Badge, Button, PageHeader, SectionTitle } from "../components/ui";
@@ -190,12 +191,12 @@ export function MetamorphosisPage() {
                 {(jobs?.jobs ?? []).slice(0, 12).map((j: any) => (
                   <li key={j.id} className="flex items-center gap-2 rounded-[8px] px-2 py-1.5 text-[12.5px] hover:bg-surface">
                     <span className="flex-1 truncate text-ink-2">{jobLabel(j.kind)}</span>
-                    <Badge tone={j.status === "done" ? "ok" : j.status === "failed" ? "danger" : j.status === "running" ? "accent" : "neutral"}>{j.status}</Badge>
+                    <Badge tone={j.status === "done" ? "ok" : j.status === "failed" || j.status === "interrupted" ? "danger" : j.status === "running" ? "accent" : "neutral"}>{JOB_STATUS_LABEL[j.status] ?? j.status}</Badge>
                     {j.status === "pending" || j.status === "running" ? (
                       <button className="text-[12px] text-ink-3 hover:text-ink" onClick={() => run(() => rpc("jobs.cancel", { id: j.id }), "Cancelled")}>
                         Cancel
                       </button>
-                    ) : j.status === "failed" ? (
+                    ) : j.status === "failed" || j.status === "interrupted" ? (
                       <button className="text-[12px] text-ink-3 hover:text-ink" title={j.last_error} onClick={() => run(() => rpc("jobs.retry", { id: j.id }), "Queued again")}>
                         Retry
                       </button>

@@ -24,6 +24,8 @@ export const DEFAULT_SETTINGS = {
   "automation.reflectIntervalMin": 30,
   "automation.learnFromTranscripts": false,
   "automation.paused": false,
+  // v0.4.0 proactive intelligence: background analysis (Awareness, Knowledge Health, Discovery, agents) on idle.
+  "intelligence.background": true,
   "mcp.permissions": { read: true, write: true, merge: true, archive: true, delete: false },
   "mcp.http.enabled": false,
   "mcp.http.port": 47821,

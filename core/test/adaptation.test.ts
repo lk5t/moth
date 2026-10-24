@@ -1,3 +1,4 @@
+import { SCHEMA_VERSION } from "../src/db/migrations.ts";
 // v0.2.5 First Flight & Adaptation — engine tests (no AI inference involved; these are not proof of AI quality).
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -35,7 +36,7 @@ test("migration v3 upgrades an existing v2 database without losing data", () => 
   db.close();
 
   const b = Brain.open({ dataDir: dir, role: "test" });
-  assert.equal(Number(b.db.value("SELECT MAX(version) FROM schema_migrations")), 3);
+  assert.equal(Number(b.db.value("SELECT MAX(version) FROM schema_migrations")), SCHEMA_VERSION);
   const a = b.store.requireMemory("mem_a");
   assert.equal(a.content, "Inventory has 6 slots");
   assert.equal(a.memory_type, "project");
@@ -296,7 +297,7 @@ test("backups are integrity-checked, honour location/retention and restore a val
   const info = b.inspectBackup(bk.name);
   assert.equal(info.ok, true);
   assert.equal(info.memories, 2);
-  assert.equal(info.schema_version, 3);
+  assert.equal(info.schema_version, SCHEMA_VERSION);
   b.store.updateMemory(m.id, { content: "After backup: changed." }, user);
   const methods = rpc(() => b, () => {
     b.close();

@@ -330,7 +330,7 @@ export class Cortex {
     const end = Date.now() + timeoutMs;
     while (Date.now() < end) {
       const row = this.brain.db.get<Row>("SELECT * FROM jobs WHERE id = ?", [id]);
-      if (row && ["done", "failed", "cancelled"].includes(row.status as string)) return { ...row, result: safeJson(row.result as string, null) };
+      if (row && ["done", "failed", "cancelled", "interrupted", "awaiting_approval"].includes(row.status as string)) return { ...row, result: safeJson(row.result as string, null) };
       await new Promise((r) => setTimeout(r, 400));
     }
     return null;
@@ -685,9 +685,10 @@ export class Cortex {
   }
 
   registerJobs(): void {
-    this.brain.jobs.register("cortex_organize", async (job, signal) => this.organize(job.payload.memory_id, signal));
-    this.brain.jobs.register("cortex_learn", async (job, signal) => this.learn(job.payload as LearnInput, signal));
-    this.brain.jobs.register("cortex_context", async (job, signal) => this.intelligentContext(job.payload.query, { project: job.payload.project, synthesize: true, signal }));
+    this.brain.jobs.register("cortex_organize", async (job, signal) => this.organize(job.payload.memory_id, signal), { owner: "cortex" });
+    // Learning commits memories statement by statement: after an interruption it waits for the user (no double writes).
+    this.brain.jobs.register("cortex_learn", async (job, signal) => this.learn(job.payload as LearnInput, signal), { owner: "cortex", resumable: false });
+    this.brain.jobs.register("cortex_context", async (job, signal) => this.intelligentContext(job.payload.query, { project: job.payload.project, synthesize: true, signal }), { owner: "cortex", timeoutMs: 120_000 });
     const stateFile = path.join(this.dir, "runtime-state.json");
     void LlamaRuntime.cleanupOrphan(stateFile);
   }

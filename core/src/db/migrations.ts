@@ -513,6 +513,137 @@ CREATE TABLE inbox_files (
 );
 `,
   },
+  {
+    // v0.4.0 "Consciousness" — Milestone 1: durable intelligence foundation.
+    // Jobs gain lifecycle states (interrupted, awaiting approval), ownership, scope, time limits and timestamps.
+    // SQLite cannot change a CHECK constraint in place, so the table is rebuilt; every existing row is kept.
+    version: 4,
+    name: "intelligence_foundation",
+    sql: `
+CREATE TABLE jobs_v4 (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL DEFAULT '{}',
+  dedupe_key TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','running','done','failed','cancelled','interrupted','awaiting_approval')),
+  priority INTEGER NOT NULL DEFAULT 5,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 4,
+  run_after TEXT NOT NULL,
+  last_error TEXT,
+  result TEXT,
+  locked_by TEXT,
+  locked_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  owner TEXT NOT NULL DEFAULT 'system',
+  title TEXT NOT NULL DEFAULT '',
+  project_id TEXT,
+  scope TEXT NOT NULL DEFAULT 'system',
+  timeout_ms INTEGER,
+  started_at TEXT,
+  finished_at TEXT,
+  cancel_reason TEXT,
+  result_ref TEXT,
+  recoveries INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO jobs_v4(id, kind, payload, dedupe_key, status, priority, attempts, max_attempts, run_after, last_error, result, locked_by, locked_at, created_at, updated_at, finished_at)
+  SELECT id, kind, payload, dedupe_key, status, priority, attempts, max_attempts, run_after, last_error, result, locked_by, locked_at, created_at, updated_at,
+         CASE WHEN status IN ('done','failed','cancelled') THEN updated_at END
+  FROM jobs;
+DROP TABLE jobs;
+ALTER TABLE jobs_v4 RENAME TO jobs;
+CREATE INDEX idx_jobs_ready ON jobs(status, run_after, priority);
+CREATE INDEX idx_jobs_owner ON jobs(owner, id DESC);
+CREATE UNIQUE INDEX idx_jobs_dedupe ON jobs(dedupe_key) WHERE dedupe_key IS NOT NULL AND status IN ('pending','running','awaiting_approval');
+CREATE TRIGGER trg_jobs_ins AFTER INSERT ON jobs BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('job', CAST(NEW.id AS TEXT), 'insert');
+END;
+CREATE TRIGGER trg_jobs_status AFTER UPDATE OF status ON jobs WHEN OLD.status IS NOT NEW.status BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('job', CAST(NEW.id AS TEXT), 'update');
+END;
+
+-- A job "awaiting approval" completes when the last review it created is decided (in any process).
+CREATE TRIGGER trg_review_settles_job AFTER UPDATE OF status ON review_queue
+  WHEN NEW.job_id IS NOT NULL AND NEW.status <> 'pending'
+BEGIN
+  UPDATE jobs SET status = 'done', finished_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+  WHERE id = NEW.job_id AND status = 'awaiting_approval'
+    AND NOT EXISTS (SELECT 1 FROM review_queue r WHERE r.job_id = NEW.job_id AND r.status = 'pending');
+END;
+
+-- Checkpoints: a step recorded here is never executed twice, even if the job runs again after a crash.
+CREATE TABLE job_steps (
+  job_id INTEGER NOT NULL,
+  step TEXT NOT NULL,
+  result TEXT,
+  at TEXT NOT NULL,
+  PRIMARY KEY (job_id, step)
+);
+
+-- Least-privilege permissions for background work, agents and integrations. Checked by the engine.
+-- project_id '*' = every project; a project-specific row overrides the '*' row.
+CREATE TABLE permissions (
+  subject TEXT NOT NULL,
+  permission TEXT NOT NULL,
+  project_id TEXT NOT NULL DEFAULT '*',
+  allowed INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL DEFAULT 'user',
+  PRIMARY KEY (subject, permission, project_id)
+);
+CREATE TRIGGER trg_perm_any AFTER INSERT ON permissions BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('permission', NEW.subject, 'update');
+END;
+CREATE TRIGGER trg_perm_upd AFTER UPDATE ON permissions BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('permission', NEW.subject, 'update');
+END;
+
+-- Findings: everything MOTH's intelligence produces (awareness, knowledge health, discoveries, agent
+-- recommendations), always with its evidence and how it was produced. The fingerprint identifies "the same
+-- finding" across scans; evidence_hash changes when the supporting memories change materially.
+CREATE TABLE findings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('awareness','health','discovery','agent')),
+  category TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  evidence_hash TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  project_id TEXT,
+  project_ids TEXT NOT NULL DEFAULT '[]',
+  memory_ids TEXT NOT NULL DEFAULT '[]',
+  evidence TEXT NOT NULL DEFAULT '[]',
+  source_refs TEXT NOT NULL DEFAULT '[]',
+  algorithm TEXT NOT NULL,
+  model TEXT,
+  confidence REAL,
+  evidence_status TEXT NOT NULL DEFAULT 'possible' CHECK (evidence_status IN ('confirmed','possible')),
+  severity TEXT NOT NULL DEFAULT 'info' CHECK (severity IN ('info','low','medium','high')),
+  suggested_action TEXT NOT NULL DEFAULT '',
+  action TEXT,
+  status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','viewed','dismissed','resolved','superseded','confirmed')),
+  review_id INTEGER,
+  job_id INTEGER,
+  agent TEXT,
+  resolution TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  analyzed_at TEXT NOT NULL,
+  decided_at TEXT
+);
+CREATE INDEX idx_findings_status ON findings(user_id, kind, status, id DESC);
+CREATE INDEX idx_findings_fp ON findings(user_id, kind, fingerprint, id DESC);
+CREATE UNIQUE INDEX idx_findings_active ON findings(user_id, kind, fingerprint) WHERE status IN ('new','viewed');
+CREATE TRIGGER trg_find_ins AFTER INSERT ON findings BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('finding', CAST(NEW.id AS TEXT), 'insert');
+END;
+CREATE TRIGGER trg_find_upd AFTER UPDATE OF status ON findings WHEN OLD.status IS NOT NEW.status BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('finding', CAST(NEW.id AS TEXT), 'update');
+END;
+`,
+  },
 ];
 
 export function runMigrations(db: Database): void {

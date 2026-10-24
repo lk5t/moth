@@ -95,3 +95,14 @@ export const AREA_LABEL: Record<string, string> = {
   lesson: "Lessons",
   other: "Other",
 };
+
+/** Job states as the user sees them (internal "pending" = Queued, "done" = Completed). */
+export const JOB_STATUS_LABEL: Record<string, string> = {
+  pending: "Queued",
+  running: "Running",
+  done: "Completed",
+  failed: "Failed",
+  cancelled: "Cancelled",
+  interrupted: "Interrupted",
+  awaiting_approval: "Awaiting approval",
+};

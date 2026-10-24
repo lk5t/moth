@@ -14,6 +14,8 @@ import { Cortex } from "../cortex/cortex.ts";
 import { buildContext, contextIds, type ContextPackage } from "./context.ts";
 import { createRemoteProvider, vecToBlob } from "./embeddings.ts";
 import { JobQueue } from "./jobs.ts";
+import { Findings } from "../intelligence/findings.ts";
+import { Permissions } from "../intelligence/permissions.ts";
 import { LearningEngine, type LearningInput } from "./learning.ts";
 import { Metamorphosis } from "./metamorphosis.ts";
 import { SearchEngine } from "./search.ts";
@@ -41,6 +43,8 @@ export class Brain {
   readonly inbox: ReviewInbox;
   readonly adaptation: Adaptation;
   readonly folders: WatchedFolders;
+  readonly permissions: Permissions;
+  readonly findings: Findings;
   readonly paths: MothPaths;
   /** Reported by the desktop shell (Windows idle time and power state); null when unknown. */
   system: { idleSeconds: number | null; onBattery: boolean | null; batterySaver: boolean | null; updatedAt: number } = { idleSeconds: null, onBattery: null, batterySaver: null, updatedAt: 0 };
@@ -69,6 +73,8 @@ export class Brain {
     this.learning = new LearningEngine(this.store, this.search, this.ai);
     this.meta = new Metamorphosis(this.store, this.search, this.learning, this.ai);
     this.jobs = new JobQueue(this.db);
+    this.permissions = new Permissions(this.db, this.store);
+    this.findings = new Findings(this.db, this.store);
     this.cortex = new Cortex(this);
     this.inbox = new ReviewInbox(this);
     this.adaptation = new Adaptation(this);
@@ -174,10 +180,19 @@ export class Brain {
   /** SQL condition for jobs that may run now; held jobs stay pending and resume only when the user resumes. */
   heldJobsSql(): string | null {
     const held: string[] = [];
+    // Proactive intelligence (awareness, health, discovery, agents): job kinds start with "intel_".
     if (this.learningHeld()) {
       held.push("kind IN ('reflect','discover_links','transcript_learning','embed_remote','vault_sync','sleep_cycle')");
       held.push("(kind = 'cortex_learn' AND COALESCE(json_extract(payload,'$.origin'),'') <> 'user')");
-    } else if (this.deferReason()) held.push("kind IN ('reflect','embed_remote','vault_sync','sleep_cycle')");
+      // Privacy Mode / Pause Learning: no analysis at all, not even manual runs.
+      held.push("kind LIKE 'intel\\_%' ESCAPE '\\'");
+    } else {
+      if (this.deferReason()) {
+        held.push("kind IN ('reflect','embed_remote','vault_sync','sleep_cycle')");
+        held.push("(kind LIKE 'intel\\_%' ESCAPE '\\' AND scope = 'background')");
+      }
+      if (!this.settings.get("intelligence.background")) held.push("(kind LIKE 'intel\\_%' ESCAPE '\\' AND scope = 'background')");
+    }
     return held.length ? `NOT (${held.join(" OR ")})` : null;
   }
 
@@ -213,32 +228,33 @@ export class Brain {
     const started = Date.now();
     if (this.reflectTimer) clearTimeout(this.reflectTimer);
     if (this.inboxTimer) clearTimeout(this.inboxTimer);
-    await this.jobs.drain(timeoutMs);
+    const released = await this.jobs.drain(timeoutMs);
     try {
       await Promise.race([this.cortex.unload(), new Promise((r) => setTimeout(r, 4000))]);
     } catch {
       /* fall through to a hard stop */
     }
     this.cortex.shutdown();
-    const requeued = this.db.run("UPDATE jobs SET status = 'pending', locked_by = NULL, locked_at = NULL WHERE status = 'running' AND locked_by = ?", [this.jobs.workerId]).changes;
+    const { requeued, interrupted } = released;
     try {
       this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
     } catch {
       /* another process may hold the database */
     }
-    this.store.logActivity({ kind: "system", source: "core", action: "shutdown", detail: { requeued, ms: Date.now() - started } });
+    this.store.logActivity({ kind: "system", source: "core", action: "shutdown", detail: { requeued, interrupted, ms: Date.now() - started } });
     this.db.close();
-    return { requeued, ms: Date.now() - started };
+    return { requeued, interrupted, ms: Date.now() - started };
   }
 
   // ------------------------------------------------------------------ background engine (app process only)
   startBackground(): void {
     const j = this.jobs;
-    j.register("reflect", async (_job, signal) => this.meta.reflect({ signal }));
+    j.register("reflect", async (_job, signal) => this.meta.reflect({ signal }), { owner: "metamorphosis" });
     j.register("discover_links", async (job) => ({ links: this.learning.discoverLinks(job.payload.memory_id, { actor: "moth", reason: "New memory analysed for connections" }) }));
-    j.register("embed_remote", async (job) => this.embedRemote(job.payload.limit ?? 64));
-    j.register("backup", async () => ({ file: this.backup("auto").name }));
-    j.register("transcript_learning", async (job) => this.learnFromTranscript(job.payload));
+    j.register("embed_remote", async (job) => this.embedRemote(job.payload.limit ?? 64), { owner: "search" });
+    j.register("backup", async () => ({ file: this.backup("auto").name }), { owner: "backup" });
+    // Learning from a transcript writes memories as it goes: never re-run on its own after an interruption.
+    j.register("transcript_learning", async (job) => this.learnFromTranscript(job.payload), { owner: "sessions", resumable: false });
     j.register("maintenance", async () => {
       this.jobs.prune();
       this.db.run("DELETE FROM db_changes WHERE id < (SELECT MAX(id) - 20000 FROM db_changes)");
@@ -246,9 +262,9 @@ export class Brain {
       this.db.run("UPDATE mcp_clients SET status = 'disconnected' WHERE status = 'connected' AND last_seen_at < ?", [new Date(Date.now() - 10 * 60_000).toISOString()]);
       return { ok: true };
     });
-    j.register("vault_sync", async () => this.folders.syncVault());
-    j.register("sleep_cycle", async (job, signal) => this.sleepCycle(signal, !!job.payload?.manual));
-    j.register("transfer_refresh", async (job) => this.adaptation.refreshTransfer(job.payload.project_id));
+    j.register("vault_sync", async () => this.folders.syncVault(), { owner: "folders" });
+    j.register("sleep_cycle", async (job, signal) => this.sleepCycle(signal, !!job.payload?.manual), { owner: "metamorphosis" });
+    j.register("transfer_refresh", async (job) => this.adaptation.refreshTransfer(job.payload.project_id), { owner: "projects" });
     this.cortex.registerJobs();
     j.heldSql = () => this.heldJobsSql();
     j.start();

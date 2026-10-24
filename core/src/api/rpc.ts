@@ -1,4 +1,6 @@
 // RPC methods the desktop UI calls. Every method maps to real engine operations.
+import type { FindingKind } from "../intelligence/findings.ts";
+import type { Permission } from "../intelligence/permissions.ts";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import type { Row } from "../db/database.ts";
@@ -213,8 +215,20 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
       if (ev && ev.actor === "moth") br.cortex.recordFeedback({ subject_type: "learning_event", subject_id: String(p.id), verdict: "incorrect", operation: String(ev.kind), statement: String(ev.description), note: "Undone by the user" });
       return r;
     },
-    "jobs.list": () => ({ jobs: b().jobs.list(100), counts: b().jobs.counts() }),
-    "jobs.cancel": (p: { id: number }) => ({ ok: b().jobs.cancel(Number(p.id)) }),
+    "jobs.list": (p: { owner?: string; status?: string; limit?: number } = {}) => ({ jobs: b().jobs.list({ owner: p?.owner, status: p?.status, limit: p?.limit ?? 100 }), counts: b().jobs.counts() }),
+    "jobs.get": (p: { id: number }) => b().jobs.get(Number(p.id)) ?? (() => { throw new MothError("not_found", "No such job"); })(),
+    "jobs.cancel": (p: { id: number; reason?: string }) => ({ ok: b().jobs.cancel(Number(p.id), p.reason || "Cancelled by you") }),
+
+    // ---------------------------------------------------------------- v0.4.0: permissions and findings (provenance)
+    "permissions.matrix": () => ({ subjects: b().permissions.matrix() }),
+    "permissions.set": (p: { subject: string; permission: Permission; allowed: boolean; project_id?: string | null }) => b().permissions.set(req(p.subject, "subject"), p.permission, !!p.allowed, p.project_id ?? null, "user"),
+    "permissions.clear": (p: { subject: string; permission: Permission; project_id: string }) => (b().permissions.clear(req(p.subject, "subject"), p.permission, req(p.project_id, "project_id")), { ok: true }),
+    "findings.list": (p: { kind?: FindingKind; status?: any; project_id?: string; category?: string; limit?: number } = {}) => b().findings.list(p ?? {}),
+    "findings.get": (p: { id: number }) => b().findings.get(Number(p.id)),
+    "findings.counts": () => b().findings.counts(),
+    "findings.view": (p: { id: number }) => b().findings.markViewed(Number(p.id)),
+    "findings.dismiss": (p: { id: number; note?: string }) => b().findings.dismiss(Number(p.id), p.note),
+    "findings.resolve": (p: { id: number; note?: string }) => b().findings.resolve(Number(p.id), p.note),
     "jobs.retry": (p: { id: number }) => ({ ok: b().jobs.retry(Number(p.id)) }),
     "meta.stats": () => b().meta.stats(),
     "meta.growth": (p: { days?: number } = {}) => b().meta.growth(Math.max(7, Math.min(p?.days ?? 30, 365))),

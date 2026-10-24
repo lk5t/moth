@@ -342,7 +342,7 @@ test("job queue: dedupe, retry with backoff, cancel, crash recovery", async () =
   const c = b.jobs.enqueue("flaky", {}, {})!;
   assert.equal(b.jobs.cancel(c), true);
   b.db.run("INSERT INTO jobs(kind, payload, status, run_after, created_at, updated_at, locked_at) VALUES ('flaky','{}','running',?,?,?,?)", [new Date().toISOString(), new Date().toISOString(), new Date().toISOString(), new Date(0).toISOString()]);
-  assert.equal(b.jobs.recoverStale(), 1);
+  assert.deepEqual(b.jobs.recoverStale(), { requeued: 1, interrupted: 0 });
   b.jobs.stop();
   b.close();
 });
