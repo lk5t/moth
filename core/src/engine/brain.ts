@@ -19,6 +19,7 @@ import { HANDOFF_SCHEMA, HANDOFF_SYSTEM, Handoffs, readTranscript } from "../int
 import { ProjectIntel } from "../intelligence/projects.ts";
 import { Awareness, knowledgeChangeMark } from "../intelligence/awareness.ts";
 import { KnowledgeHealth } from "../intelligence/health.ts";
+import { Discovery } from "../intelligence/discovery.ts";
 import { Permissions } from "../intelligence/permissions.ts";
 import { LearningEngine, type LearningInput } from "./learning.ts";
 import { Metamorphosis } from "./metamorphosis.ts";
@@ -53,6 +54,7 @@ export class Brain {
   readonly projectIntel: ProjectIntel;
   readonly awareness: Awareness;
   readonly health: KnowledgeHealth;
+  readonly discovery: Discovery;
   private awarenessMark = -1;
   readonly paths: MothPaths;
   /** Reported by the desktop shell (Windows idle time and power state); null when unknown. */
@@ -94,6 +96,7 @@ export class Brain {
     this.awareness = new Awareness(this);
     this.health = new KnowledgeHealth(this);
     this.health.registerHandlers();
+    this.discovery = new Discovery(this);
     this.folders = new WatchedFolders(this);
     this.refreshEmbeddingProvider();
     if (this.recovered) {
@@ -266,6 +269,7 @@ export class Brain {
     const j = this.jobs;
     j.register("intel_awareness_scan", async (job, signal) => this.awareness.scan({ as: job.payload?.as ?? "background", project: job.payload?.project ?? null, signal, jobId: job.id }), { owner: "awareness", timeoutMs: 5 * 60_000 });
     j.register("intel_health_scan", async (job, signal) => this.health.scan({ as: job.payload?.as ?? "background", checks: job.payload?.checks, signal, jobId: job.id }), { owner: "health", timeoutMs: 10 * 60_000 });
+    j.register("intel_discovery_scan", async (job, signal) => this.discovery.scan({ as: job.payload?.as ?? "background", signal, jobId: job.id }), { owner: "discovery", timeoutMs: 10 * 60_000 });
     j.heldSql = () => this.heldJobsSql();
   }
 
@@ -319,6 +323,9 @@ export class Brain {
         if (mark !== this.awarenessMark) {
           this.awarenessMark = mark;
           j.enqueue("intel_awareness_scan", { as: "background" }, { dedupe: "intel_awareness_scan", priority: 7, scope: "background", owner: "awareness", title: "Awareness scan" });
+          // Discovery is heavier: after knowledge changed, at most every 6 hours.
+          const lastDisc = this.db.value<string>("SELECT MAX(created_at) FROM activity_logs WHERE kind = 'discovery' AND action = 'scan'");
+          if (!lastDisc || Date.now() - Date.parse(lastDisc) > 6 * 3_600_000) j.enqueue("intel_discovery_scan", { as: "background" }, { dedupe: "intel_discovery_scan", priority: 8, scope: "background", owner: "discovery", title: "Discovery scan" });
         }
         const lastHealth = this.db.value<string>("SELECT MAX(created_at) FROM activity_logs WHERE kind = 'health' AND action = 'scan'");
         if (!lastHealth || Date.now() - Date.parse(lastHealth) > 24 * 3_600_000) j.enqueue("intel_health_scan", { as: "background" }, { dedupe: "intel_health_scan", priority: 8, scope: "background", owner: "health", title: "Knowledge health check" });

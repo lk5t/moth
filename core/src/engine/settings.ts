@@ -86,6 +86,8 @@ export const DEFAULT_SETTINGS = {
   // v0.4.0 Session Continuity: write a handoff automatically when a Claude Code session ends (reads the transcript;
   // needs the local AI). Off by default.
   "sessions.autoHandoff": false,
+  // v0.4.0 Discovery (quiet mode): only suggestions at least this confident are shown.
+  "discovery.minConfidence": 0.6,
   "appearance.sidebarCollapsed": false,
   "appearance.contextPanel": true,
   "app.launchOnStartup": false,
