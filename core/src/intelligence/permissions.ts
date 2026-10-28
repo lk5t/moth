@@ -20,6 +20,7 @@ export const PERMISSIONS = [
   "read_local_folders",
   "network",
   "external_tools",
+  "write_memories",
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
@@ -33,7 +34,20 @@ export const PERMISSION_LABEL: Record<Permission, { label: string; hint: string 
   read_local_folders: { label: "Read approved local folders", hint: "Read files in folders you approved in MOTH." },
   network: { label: "Use the internet", hint: "Fetch web pages or call online services." },
   external_tools: { label: "Use external tools", hint: "Run programs or write to other apps." },
+  write_memories: { label: "Save and change memories", hint: "Create, append to, update, link or archive memories through MOTH's tools." },
 };
+
+/** Which permissions mean something for a subject: connected Claude apps read and write through MCP tools;
+ *  background work and agents analyse and propose (they never write memories directly). */
+export const CLIENT_PERMISSIONS: Permission[] = ["read_memories", "read_projects", "write_memories"];
+export const isClient = (subject: string) => subject.startsWith("client:");
+export const appliesTo = (subject: string): Permission[] => (isClient(subject) ? CLIENT_PERMISSIONS : PERMISSIONS.filter((p) => p !== "write_memories"));
+
+/** Stable permission subject for an MCP client: its name without the version ("claude-ai 0.1.0" → "client:claude-ai"). */
+export function clientSubject(name: string | null | undefined): string {
+  const n = String(name ?? "unknown").trim().toLowerCase().replace(/\s+v?\d[\w.+-]*$/, "").replace(/\s+\(.*\)$/, "");
+  return `client:${n || "unknown"}`;
+}
 
 export const SUBJECTS = ["background", "agent:research_analyst", "agent:memory_curator", "agent:project_analyst", "agent:knowledge_connector"] as const;
 export type Subject = (typeof SUBJECTS)[number] | `client:${string}`;
@@ -49,6 +63,7 @@ const DEFAULTS: Record<Permission, boolean> = {
   read_local_folders: false,
   network: false,
   external_tools: false,
+  write_memories: true,
 };
 
 /** Permissions that can never be granted to automated work, whatever the database says. */
@@ -67,6 +82,7 @@ export class Permissions {
   /** Is `subject` allowed `perm` (optionally for one project)? */
   allowed(subject: Subject | string, perm: Permission, projectId?: string | null): boolean {
     if (!(PERMISSIONS as readonly string[]).includes(perm)) return false;
+    if (!appliesTo(subject).includes(perm)) return false;
     if (NEVER_AUTOMATIC.has(perm) && (subject === "background" || subject.startsWith("agent:"))) return false;
     if (projectId) {
       const own = this.row(subject, perm, projectId);
@@ -91,6 +107,7 @@ export class Permissions {
 
   set(subject: Subject | string, perm: Permission, allowed: boolean, projectId: string | null = null, by = "user"): Row {
     if (!(PERMISSIONS as readonly string[]).includes(perm)) throw new MothError("invalid_input", `Unknown permission "${perm}"`);
+    if (!appliesTo(subject).includes(perm)) throw new MothError("invalid_input", `"${PERMISSION_LABEL[perm].label}" doesn't apply to ${describe(subject)}`);
     if (allowed && NEVER_AUTOMATIC.has(perm) && (subject === "background" || subject.startsWith("agent:"))) {
       throw new MothError("invalid_input", `${PERMISSION_LABEL[perm].label} can't be given to automated work: those changes always wait for your approval.`);
     }
@@ -108,13 +125,21 @@ export class Permissions {
     this.db.run("DELETE FROM permissions WHERE subject = ? AND permission = ? AND project_id = ?", [subject, perm, projectId]);
   }
 
+  /** MCP clients MOTH has actually seen (from recorded sessions) or has rules for. */
+  clientSubjects(): string[] {
+    const seen = this.db.all<Row>("SELECT DISTINCT client_name FROM mcp_clients WHERE client_name IS NOT NULL AND client_name <> 'moth-self-test'").map((r) => clientSubject(r.client_name as string));
+    const ruled = this.db.all<Row>("SELECT DISTINCT subject FROM permissions WHERE subject LIKE 'client:%'").map((r) => r.subject as string);
+    return [...new Set([...seen, ...ruled])].sort();
+  }
+
   /** The effective matrix for the UI. */
-  matrix(subjects: string[] = [...SUBJECTS]): Row[] {
+  matrix(subjects: string[] = [...SUBJECTS, ...this.clientSubjects()]): Row[] {
     const overrides = this.db.all<Row>("SELECT * FROM permissions WHERE project_id <> '*' ORDER BY subject, permission");
     return subjects.map((s) => ({
       subject: s,
+      kind: isClient(s) ? "client" : "automated",
       label: describe(s),
-      permissions: PERMISSIONS.map((p) => ({ permission: p, ...PERMISSION_LABEL[p], allowed: this.allowed(s, p), locked: NEVER_AUTOMATIC.has(p) && (s === "background" || s.startsWith("agent:")) })),
+      permissions: appliesTo(s).map((p) => ({ permission: p, ...PERMISSION_LABEL[p], allowed: this.allowed(s, p), locked: NEVER_AUTOMATIC.has(p) && (s === "background" || s.startsWith("agent:")) })),
       project_overrides: overrides.filter((o) => o.subject === s).map((o) => ({ permission: o.permission, project_id: o.project_id, allowed: !!o.allowed })),
     }));
   }
@@ -129,6 +154,9 @@ export function describe(subject: string): string {
     "agent:knowledge_connector": "Knowledge Connector",
   };
   if (names[subject]) return names[subject];
-  if (subject.startsWith("client:")) return subject.slice(7);
+  if (subject.startsWith("client:")) {
+    const n = subject.slice(7);
+    return n === "claude-ai" ? "Claude Desktop" : n === "claude-code" ? "Claude Code" : n;
+  }
   return subject;
 }

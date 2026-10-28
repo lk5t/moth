@@ -230,6 +230,9 @@ const STATE_TEXT: Record<string, { label: string; tone: "ok" | "neutral" | "warn
   configured: { label: "Configuration detected", tone: "accent" },
   restart_required: { label: "Restart required", tone: "warn" },
   test_failed: { label: "Connection test failed", tone: "danger" },
+  disconnected: { label: "Disconnected", tone: "neutral" },
+  error: { label: "Error", tone: "danger" },
+  authorization_required: { label: "Authorization required", tone: "warn" },
 };
 
 function ClaudeStep({ onNext, onSkip, onBack }: { onNext: () => void; onSkip: () => void; onBack: () => void }) {

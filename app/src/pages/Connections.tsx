@@ -1,6 +1,6 @@
-import { Check, CircleX, ClipboardCopy, PlugZap, RefreshCw, Stethoscope, Unplug } from "lucide-react";
-import { useState, type ReactNode } from "react";
-import { Badge, Button, Field, Input, PageHeader, SectionTitle, Switch } from "../components/ui";
+import { Check, CircleX, ClipboardCopy, Lock, PlugZap, RefreshCw, Stethoscope, Unplug } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Badge, Button, Field, Input, PageHeader, SectionTitle, Select, Switch, Tabs } from "../components/ui";
 import { rpc } from "../lib/api";
 import { useApp } from "../lib/app";
 import { useLive } from "../lib/hooks";
@@ -12,6 +12,9 @@ const CLIENT_STATE: Record<string, { label: string; tone: "ok" | "neutral" | "wa
   configured: { label: "Configuration detected", tone: "accent" },
   restart_required: { label: "Restart required", tone: "warn" },
   test_failed: { label: "Connection test failed", tone: "danger" },
+  disconnected: { label: "Disconnected", tone: "neutral" },
+  error: { label: "Error", tone: "danger" },
+  authorization_required: { label: "Authorization required", tone: "warn" },
 };
 
 function Diagnostics() {
@@ -54,7 +57,11 @@ function Diagnostics() {
 }
 
 export function ConnectionsPage() {
-  const { toast } = useApp();
+  const { toast, params } = useApp();
+  const [tab, setTab] = useState<"overview" | "permissions">(params.tab === "permissions" ? "permissions" : "overview");
+  useEffect(() => {
+    if (params.tab === "permissions" || params.tab === "overview") setTab(params.tab);
+  }, [params.tab]);
   const { data: s, reload } = useLive<any>("connections.status", {}, { entities: ["activity"] });
   const { data: instr } = useLive<any>("connections.instructions", {}, { entities: [] });
   const [test, setTest] = useState<any | null>(null);
@@ -89,22 +96,48 @@ export function ConnectionsPage() {
         title="Connections"
         description="How Claude reaches MOTH. Claude uses MOTH through MCP tools when it starts and finishes tasks; MOTH never sees chats Claude doesn't share with it."
         actions={
-          <Button onClick={selfTest} loading={testing}>
-            <PlugZap /> Test MCP server
-          </Button>
+          <div className="flex items-center gap-2">
+            <Tabs
+              value={tab}
+              onChange={setTab}
+              items={[
+                { value: "overview", label: "Connections" },
+                { value: "permissions", label: "Permissions" },
+              ]}
+            />
+            <Button onClick={selfTest} loading={testing}>
+              <PlugZap /> Test MCP server
+            </Button>
+          </div>
         }
       />
+      {tab === "permissions" ? (
+        <PermissionsTab />
+      ) : (
       <div className="grid gap-6 px-8 pb-10 xl:grid-cols-2">
         {s?.clients ? (
-          <div className="flex flex-wrap gap-2 xl:col-span-2">
+          <div className="grid gap-2 md:grid-cols-2 xl:col-span-2" data-testid="client-states">
             {[
               ["Claude Desktop", s.clients.claude_desktop],
               ["Claude Code", s.clients.claude_code],
+              ...(s.clients.others ?? []).map((o: any) => [o.name, o]),
             ].map(([name, c]: any) => (
-              <div key={name} className="flex items-center gap-2 rounded-[10px] border border-line px-3 py-2 text-[12.5px]">
-                <span className="text-ink">{name}</span>
-                <Badge tone={CLIENT_STATE[c.state]?.tone ?? "neutral"}>{CLIENT_STATE[c.state]?.label ?? c.state}</Badge>
-                {c.last_seen ? <span className="text-ink-3">last seen {timeAgo(c.last_seen)}</span> : null}
+              <div key={name} className="rounded-[10px] border border-line px-3.5 py-2.5 text-[12.5px]">
+                <div className="flex items-center gap-2">
+                  <span className="text-ink">{name}</span>
+                  <Badge tone={CLIENT_STATE[c.state]?.tone ?? "neutral"}>{CLIENT_STATE[c.state]?.label ?? c.state}</Badge>
+                  {c.calls ? <span className="ml-auto text-ink-3">{c.calls} calls</span> : null}
+                </div>
+                <ul className="mt-1.5 space-y-0.5 text-[11.5px] text-ink-3">
+                  {(c.evidence ?? []).map((e: string, i: number) => (
+                    <li key={i} className="break-words">· {e}</li>
+                  ))}
+                </ul>
+                {c.state === "authorization_required" ? (
+                  <button className="mt-1.5 text-[12px] text-accent hover:text-accent-soft" onClick={() => setTab("permissions")}>
+                    Review its permissions
+                  </button>
+                ) : null}
               </div>
             ))}
           </div>
@@ -258,6 +291,107 @@ export function ConnectionsPage() {
           it. Claude.ai in the browser and the mobile apps can't run local MCP servers.
         </div>
       </div>
+      )}
+    </div>
+  );
+}
+
+/** Who may do what: connected Claude apps (enforced on every MCP tool call) and MOTH's own background work and
+ *  agents. Per-project overrides take priority over the general rule. */
+function PermissionsTab() {
+  const { toast } = useApp();
+  const { data, reload } = useLive<any>("permissions.matrix", {}, { entities: ["permission", "activity"] });
+  const { data: projects } = useLive<any[]>("projects.list", {}, { entities: ["project"] });
+  const [adding, setAdding] = useState<Record<string, string>>({});
+  const act = async (fn: () => Promise<unknown>) => {
+    try {
+      await fn();
+      void reload();
+    } catch (e) {
+      toast({ kind: "error", text: (e as Error).message });
+    }
+  };
+  const subjects: any[] = data?.subjects ?? [];
+  const pname = (id: string) => (projects ?? []).find((p: any) => p.id === id)?.name ?? id;
+  const groups = [
+    { title: "Connected apps", hint: "Checked on every tool call. Turning off a project hides its memories from that app (answers say how many were left out) and refuses changes there.", items: subjects.filter((x) => x.kind === "client") },
+    { title: "MOTH's background work and agents", hint: "Analysis and suggestions only. Changing important knowledge and using external tools are never automatic; those always wait for you.", items: subjects.filter((x) => x.kind !== "client") },
+  ];
+  return (
+    <div className="grid gap-5 px-8 pb-10" data-testid="permissions-tab">
+      {groups.map((g) => (
+        <section key={g.title} className="panel p-4">
+          <h2 className="text-[14px] text-ink">{g.title}</h2>
+          <p className="mt-0.5 text-[12px] text-ink-3">{g.hint}</p>
+          {g.items.length ? (
+            <div className="mt-3 grid gap-3">
+              {g.items.map((sub) => (
+                <div key={sub.subject} className="rounded-[10px] border border-line p-3">
+                  <div className="text-[13px] text-ink">{sub.label}</div>
+                  <div className="mt-2 grid gap-x-6 gap-y-1.5 md:grid-cols-2 xl:grid-cols-3">
+                    {sub.permissions.map((p: any) => (
+                      <label key={p.permission} className="flex items-center gap-2 text-[12.5px] text-ink-2" title={p.hint}>
+                        {p.locked ? <Lock className="size-3.5 text-ink-3" /> : <Switch checked={p.allowed} onChange={(v) => void act(() => rpc("permissions.set", { subject: sub.subject, permission: p.permission, allowed: v }))} label={`${sub.label}: ${p.label}`} />}
+                        <span className={cn(p.locked && "text-ink-3")}>{p.label}</span>
+                        {p.locked ? <span className="text-[11px] text-ink-3">(always asks you)</span> : null}
+                      </label>
+                    ))}
+                  </div>
+                  <div className="mt-2.5 border-t border-line pt-2">
+                    <span className="text-[11.5px] text-ink-3">Project exceptions</span>
+                    <ul className="mt-1 space-y-1">
+                      {sub.project_overrides.map((o: any) => (
+                        <li key={o.permission + o.project_id} className="flex items-center gap-2 text-[12px] text-ink-2">
+                          <span className="text-ink">{pname(o.project_id)}</span>·
+                          <span>{sub.permissions.find((p: any) => p.permission === o.permission)?.label ?? o.permission}</span>
+                          <Badge tone={o.allowed ? "ok" : "warn"}>{o.allowed ? "allowed" : "not allowed"}</Badge>
+                          <button className="ml-auto text-[11.5px] text-ink-3 hover:text-ink" onClick={() => void act(() => rpc("permissions.clear", { subject: sub.subject, permission: o.permission, project_id: o.project_id }))}>
+                            Remove
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                      <Select value={adding[sub.subject] ?? ""} onChange={(e) => setAdding({ ...adding, [sub.subject]: e.target.value })} aria-label={`Project for ${sub.label}`} className="h-7">
+                        <option value="">Choose a project…</option>
+                        {(projects ?? []).map((p: any) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name}
+                            {p.private ? " (private)" : ""}
+                          </option>
+                        ))}
+                      </Select>
+                      <Button
+                        size="sm"
+                        disabled={!adding[sub.subject]}
+                        onClick={() =>
+                          void act(async () => {
+                            const perms = sub.kind === "client" ? ["read_memories", "read_projects", "write_memories"] : ["read_memories", "read_projects"];
+                            for (const perm of perms) await rpc("permissions.set", { subject: sub.subject, permission: perm, allowed: false, project_id: adding[sub.subject] });
+                            toast({ kind: "ok", text: `${sub.label} can no longer use ${pname(adding[sub.subject])}` });
+                          })
+                        }
+                      >
+                        Block this project
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={!adding[sub.subject]}
+                        onClick={() => void act(() => rpc("permissions.set", { subject: sub.subject, permission: "read_memories", allowed: true, project_id: adding[sub.subject] }))}
+                      >
+                        Allow reading it
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-2 text-[12.5px] text-ink-3">{g.title === "Connected apps" ? "No app has connected yet. Apps appear here after their first connection." : "Nothing here."}</p>
+          )}
+        </section>
+      ))}
     </div>
   );
 }

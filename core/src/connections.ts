@@ -7,8 +7,10 @@ import path from "node:path";
 import type { Row } from "./db/database.ts";
 import type { Brain } from "./engine/brain.ts";
 import { MothError } from "./engine/types.ts";
+import { safeJson } from "./engine/store.ts";
 import { selfCommand } from "./paths.ts";
 import { TOOL_NAMES } from "./mcp/server.ts";
+import { clientSubject } from "./intelligence/permissions.ts";
 
 export function claudeDesktopConfigCandidates(): string[] {
   const home = os.homedir();
@@ -221,7 +223,7 @@ export function connectionStatus(brain: Brain): Row {
 }
 
 /** Launches MOTH's own MCP server exactly as Claude would and performs a real handshake + tool listing. */
-export function selfTest(timeoutMs = 15000): Promise<{ ok: boolean; tools: string[]; serverInfo?: unknown; error?: string; ms: number; steps: Record<string, boolean>; toolCall?: unknown }> {
+export function selfTest(timeoutMs = 20000): Promise<{ ok: boolean; tools: string[]; serverInfo?: unknown; error?: string; ms: number; steps: Record<string, boolean>; toolCall?: unknown; details: Record<string, string> }> {
   const e = mcpServerEntry();
   const started = Date.now();
   return new Promise((resolve) => {
@@ -230,7 +232,8 @@ export function selfTest(timeoutMs = 15000): Promise<{ ok: boolean; tools: strin
     let serverInfo: unknown;
     let done = false;
     let tools: string[] = [];
-    const steps: Record<string, boolean> = { started: false, initialized: false, tools_listed: false, tool_executed: false };
+    const steps: Record<string, boolean> = { started: false, initialized: false, tools_listed: false, tool_executed: false, memory_retrieval: false, handoff_retrieval: false, error_handling: false };
+    const details: Record<string, string> = {};
     let toolCall: unknown;
     const finish = (r: { ok: boolean; tools: string[]; error?: string }) => {
       if (done) return;
@@ -242,7 +245,7 @@ export function selfTest(timeoutMs = 15000): Promise<{ ok: boolean; tools: strin
       } catch {
         /* gone */
       }
-      resolve({ ...r, serverInfo, ms: Date.now() - started, steps, toolCall });
+      resolve({ ...r, serverInfo, ms: Date.now() - started, steps, toolCall, details });
     };
     const timer = setTimeout(() => finish({ ok: false, tools: [], error: "Timed out waiting for the MCP server" }), timeoutMs);
     const send = (m: unknown) => child.stdin.write(JSON.stringify(m) + "\n");
@@ -276,7 +279,25 @@ export function selfTest(timeoutMs = 15000): Promise<{ ok: boolean; tools: strin
         } else if (msg.id === 3) {
           steps.tool_executed = !!msg.result && !msg.result.isError;
           toolCall = { tool: "moth_get_ai_status", ok: steps.tool_executed, error: msg.error?.message ?? (msg.result?.isError ? String(msg.result?.content?.[0]?.text ?? "").slice(0, 300) : undefined) };
-          finish({ ok: steps.tools_listed && steps.tool_executed, tools, error: steps.tools_listed ? (steps.tool_executed ? undefined : "A MOTH tool failed when it was called") : "Some MOTH tools are missing" });
+          // Memory retrieval through the same path Claude uses (read-only search).
+          send({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "moth_search_memories", arguments: { query: "project decisions", limit: 3 } } });
+        } else if (msg.id === 4) {
+          const sc = msg.result?.structuredContent;
+          steps.memory_retrieval = !!msg.result && !msg.result.isError && typeof sc?.count === "number";
+          details.memory_retrieval = steps.memory_retrieval ? `Search answered with ${sc.count} result${sc.count === 1 ? "" : "s"}` : String(msg.result?.content?.[0]?.text ?? msg.error?.message ?? "No answer").slice(0, 200);
+          send({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "moth_get_latest_handoff", arguments: {} } });
+        } else if (msg.id === 5) {
+          const sc = msg.result?.structuredContent;
+          steps.handoff_retrieval = !!msg.result && !msg.result.isError && sc && "handoff" in sc;
+          details.handoff_retrieval = steps.handoff_retrieval ? (sc.handoff ? `Latest handoff returned (${String(sc.handoff.project ?? "no project")})` : "Answered correctly: no handoff saved yet") : String(msg.result?.content?.[0]?.text ?? msg.error?.message ?? "No answer").slice(0, 200);
+          // Error handling: a request for a memory that doesn't exist must come back as a clear tool error, not a crash.
+          send({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "moth_read_memory", arguments: { id: "mem_diagnostic_missing" } } });
+        } else if (msg.id === 6) {
+          const text = String(msg.result?.content?.[0]?.text ?? "");
+          steps.error_handling = !!msg.result?.isError && /not_found/.test(text);
+          details.error_handling = steps.error_handling ? "A request for a missing memory returned a clear \"not found\" error" : `Unexpected answer: ${text.slice(0, 160) || msg.error?.message || "none"}`;
+          const ok = steps.tools_listed && steps.tool_executed && steps.memory_retrieval && steps.handoff_retrieval && steps.error_handling;
+          finish({ ok, tools, error: !steps.tools_listed ? "Some MOTH tools are missing" : !steps.tool_executed ? "A MOTH tool failed when it was called" : !ok ? "A diagnostic tool call didn't behave as expected" : undefined });
         }
       }
     });
@@ -288,29 +309,55 @@ export function selfTest(timeoutMs = 15000): Promise<{ ok: boolean; tools: strin
  * Per-client connection state for First Flight and Diagnostics. Configuration and real connectivity are kept apart:
  * "connected" requires a recorded MCP session or successful tool call from that client.
  */
-export function clientStates(brain: Brain, lastSelfTest?: { ok: boolean } | null): Row {
+export function clientStates(brain: Brain, lastSelfTest?: { ok: boolean; error?: string } | null): Row {
   const desktop = claudeDesktopStatus();
   const code = claudeCodeStatus();
-  const clients = brain.db.all<Row>("SELECT client_name, MAX(last_seen_at) AS last_seen, SUM(calls) AS calls FROM mcp_clients WHERE client_name IS NOT NULL AND client_name <> 'moth-self-test' GROUP BY client_name");
-  const seen = (re: RegExp) => clients.filter((r) => re.test(String(r.client_name))).sort((a, b) => String(b.last_seen).localeCompare(String(a.last_seen)))[0];
+  const sessions = brain.db.all<Row>("SELECT * FROM mcp_clients WHERE client_name IS NOT NULL AND client_name <> 'moth-self-test' ORDER BY last_seen_at DESC LIMIT 200");
   const configuredAt = (provider: string) => brain.db.value<string>("SELECT connected_at FROM integrations WHERE user_id = ? AND provider = ?", [brain.store.userId, provider]);
-  const state = (configured: boolean, client: Row | undefined, provider: string) => {
-    if (lastSelfTest && !lastSelfTest.ok) return configured ? "test_failed" : "not_configured";
-    if (client && configured) {
-      const since = configuredAt(provider);
-      return !since || String(client.last_seen) >= since ? "connected" : "restart_required";
-    }
-    if (configured) {
-      const since = configuredAt(provider);
-      return since && Date.now() - Date.parse(since) < 24 * 3_600_000 ? "restart_required" : "configured";
-    }
-    return client ? "connected" : "not_configured";
+  const isLive = (x: Row) => x.status === "connected" && (x.transport === "http" ? Date.now() - Date.parse(x.last_seen_at as string) < 30 * 60_000 : alive(Number(x.pid)));
+  const ago = (iso: string) => {
+    const m = Math.round((Date.now() - Date.parse(iso)) / 60_000);
+    return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 48 * 60 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
   };
-  const d = seen(/^(claude-ai|claude desktop|claude)$/i);
-  const c = seen(/claude-code|claude code/i);
+  /** Status from evidence only: configuration files, recorded sessions, logged calls and the last self-test. */
+  const evaluate = (match: (name: string) => boolean, configured: boolean, provider: string | null) => {
+    const mine = sessions.filter((x) => match(String(x.client_name)));
+    const live = mine.filter(isLive);
+    const last = mine[0];
+    const lastCall = brain.db
+      .all<Row>("SELECT * FROM activity_logs WHERE kind IN ('mcp_call','mcp_auth') ORDER BY id DESC LIMIT 300")
+      .find((a) => match(String(a.source).replace(/\s+v?\d[\w.+-]*$/, "")));
+    const detail = (typeof lastCall?.detail === "string" ? safeJson<Row>(lastCall.detail as string, {}) : (lastCall?.detail ?? {})) as Row;
+    const evidence: string[] = [];
+    if (configured) evidence.push(provider === "claude_desktop" ? `MOTH entry found in ${desktop.configFile}` : provider === "claude_code" ? `MOTH entry found in ${code.file}` : "Configured");
+    else if (provider) evidence.push("No MOTH entry in its configuration file");
+    if (live.length) evidence.push(`${live.length} live session${live.length > 1 ? "s" : ""} (${live.map((x) => (x.transport === "http" ? "HTTP" : `process ${x.pid}`)).join(", ")}), last activity ${ago(live[0].last_seen_at as string)}`);
+    else if (last) evidence.push(`Last session ended or went quiet ${ago(last.last_seen_at as string)}`);
+    if (lastCall) evidence.push(`Last tool call: ${lastCall.action} (${lastCall.status === "ok" ? "succeeded" : `failed: ${String(detail.error ?? "error").slice(0, 160)}`}), ${ago(lastCall.created_at as string)}`);
+    if (lastSelfTest && !lastSelfTest.ok) evidence.push(`MOTH's own server test failed: ${lastSelfTest.error ?? "unknown error"}`);
+    let state: string;
+    if (lastCall && lastCall.status !== "ok" && (detail.code === "permission_denied" || lastCall.kind === "mcp_auth")) state = "authorization_required";
+    else if (configured && lastSelfTest && !lastSelfTest.ok) state = "error";
+    else if (lastCall && lastCall.status !== "ok" && Date.now() - Date.parse(lastCall.created_at as string) < 3_600_000) state = "error";
+    else if (live.length) state = "connected";
+    else if (last && configured) {
+      const since = provider ? configuredAt(provider) : null;
+      state = since && String(last.last_seen_at) < since ? "restart_required" : "disconnected";
+    } else if (last && !provider) state = "disconnected";
+    else if (configured) {
+      const since = provider ? configuredAt(provider) : null;
+      state = since && Date.now() - Date.parse(since) < 24 * 3_600_000 ? "restart_required" : "configured";
+    } else state = "not_configured";
+    const calls = mine.reduce((n, x) => n + Number(x.calls ?? 0), 0);
+    return { state, evidence, last_seen: last?.last_seen_at ?? null, calls, live: live.length > 0, last_call: lastCall ? { tool: lastCall.action, ok: lastCall.status === "ok", at: lastCall.created_at, error: detail.error ?? null } : null };
+  };
+  const isDesktop = (n: string) => /^(claude-ai|claude desktop|claude)$/i.test(n.trim());
+  const isCode = (n: string) => /claude-code|claude code/i.test(n);
+  const others = [...new Set(sessions.map((x) => String(x.client_name)).filter((n) => !isDesktop(n) && !isCode(n)))].slice(0, 8);
   return {
-    claude_desktop: { installed: desktop.installed, configured: desktop.configured, file: desktop.configFile, state: state(desktop.configured, d, "claude_desktop"), last_seen: d?.last_seen ?? null, calls: Number(d?.calls ?? 0) },
-    claude_code: { configured: code.configured, hooks: code.hooks, file: code.file, state: state(code.configured, c, "claude_code"), last_seen: c?.last_seen ?? null, calls: Number(c?.calls ?? 0) },
+    claude_desktop: { installed: desktop.installed, configured: desktop.configured, file: desktop.configFile, subject: "client:claude-ai", ...evaluate(isDesktop, desktop.configured, "claude_desktop") },
+    claude_code: { configured: code.configured, hooks: code.hooks, file: code.file, subject: "client:claude-code", ...evaluate(isCode, code.configured, "claude_code") },
+    others: others.map((n) => ({ name: n, subject: clientSubject(n), ...evaluate((x) => x === n, false, null) })),
   };
 }
 
@@ -326,6 +373,9 @@ export async function diagnostics(brain: Brain): Promise<Row> {
     { id: "server_start", label: "MCP server starts", ok: test.steps.started && test.steps.initialized, detail: test.steps.initialized ? `Started and answered in ${test.ms} ms` : test.error ?? "Did not start" },
     { id: "tool_discovery", label: "Tool discovery", ok: test.steps.tools_listed, detail: `${test.tools.length} tools listed${test.steps.tools_listed ? "" : `; missing: ${TOOL_NAMES.filter((t) => !test.tools.includes(t)).join(", ")}`}` },
     { id: "tool_execution", label: "Tool execution", ok: test.steps.tool_executed, detail: test.steps.tool_executed ? "moth_get_ai_status ran successfully" : String((test.toolCall as Row | undefined)?.error ?? test.error ?? "Not reached") },
+    { id: "memory_retrieval", label: "Memory retrieval", ok: test.steps.memory_retrieval, detail: test.details?.memory_retrieval ?? "Not reached" },
+    { id: "handoff_retrieval", label: "Handoff retrieval", ok: test.steps.handoff_retrieval, detail: test.details?.handoff_retrieval ?? "Not reached" },
+    { id: "error_handling", label: "Error handling", ok: test.steps.error_handling, detail: test.details?.error_handling ?? "Not reached" },
     { id: "database", label: "Memory database", ok: integrity === "ok", detail: integrity === "ok" ? "Integrity check passed" : `Integrity check: ${integrity}` },
     { id: "jobs", label: "Background job queue", ok: Number(jobs.failed ?? 0) < 20, detail: `${jobs.pending} pending, ${jobs.running} running, ${jobs.failed} failed` },
     {
