@@ -83,6 +83,9 @@ export const DEFAULT_SETTINGS = {
   /** auto = Balanced, or Minimal when Windows asks apps to reduce motion. */
   "appearance.motion": "auto" as "auto" | "full" | "balanced" | "minimal",
   "appearance.ambient": true,
+  // v0.4.0 Session Continuity: write a handoff automatically when a Claude Code session ends (reads the transcript;
+  // needs the local AI). Off by default.
+  "sessions.autoHandoff": false,
   "appearance.sidebarCollapsed": false,
   "appearance.contextPanel": true,
   "app.launchOnStartup": false,

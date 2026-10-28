@@ -135,6 +135,7 @@ export function claudeCodeInstructions(): { cli: string; hooks: unknown; claudeM
       hooks: {
         UserPromptSubmit: [{ hooks: [{ type: "command", command: hookCommand("user-prompt"), timeout: 10 }] }],
         Stop: [{ hooks: [{ type: "command", command: hookCommand("stop"), timeout: 10 }] }],
+        SessionEnd: [{ hooks: [{ type: "command", command: hookCommand("session-end"), timeout: 10 }] }],
       },
     },
     claudeMd: `## Memory (MOTH)
@@ -163,6 +164,7 @@ export function configureClaudeCode(brain: Brain, withHooks: boolean): { mcpFile
     };
     add("UserPromptSubmit", hookCommand("user-prompt"));
     add("Stop", hookCommand("stop"));
+    add("SessionEnd", hookCommand("session-end"));
     backups.push(writeJsonWithBackup(settingsFile, s));
   }
   upsertIntegration(brain, "claude_code", "configured", { hooks: withHooks });

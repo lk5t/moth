@@ -15,6 +15,8 @@ import { buildContext, contextIds, type ContextPackage } from "./context.ts";
 import { createRemoteProvider, vecToBlob } from "./embeddings.ts";
 import { JobQueue } from "./jobs.ts";
 import { Findings } from "../intelligence/findings.ts";
+import { HANDOFF_SCHEMA, HANDOFF_SYSTEM, Handoffs, readTranscript } from "../intelligence/handoffs.ts";
+import { ProjectIntel } from "../intelligence/projects.ts";
 import { Permissions } from "../intelligence/permissions.ts";
 import { LearningEngine, type LearningInput } from "./learning.ts";
 import { Metamorphosis } from "./metamorphosis.ts";
@@ -45,6 +47,8 @@ export class Brain {
   readonly folders: WatchedFolders;
   readonly permissions: Permissions;
   readonly findings: Findings;
+  readonly handoffs: Handoffs;
+  readonly projectIntel: ProjectIntel;
   readonly paths: MothPaths;
   /** Reported by the desktop shell (Windows idle time and power state); null when unknown. */
   system: { idleSeconds: number | null; onBattery: boolean | null; batterySaver: boolean | null; updatedAt: number } = { idleSeconds: null, onBattery: null, batterySaver: null, updatedAt: 0 };
@@ -75,6 +79,8 @@ export class Brain {
     this.jobs = new JobQueue(this.db);
     this.permissions = new Permissions(this.db, this.store);
     this.findings = new Findings(this.db, this.store);
+    this.handoffs = new Handoffs(this.db, this.store);
+    this.projectIntel = new ProjectIntel(this.db, this.store, this.search, this.handoffs, this.permissions);
     this.cortex = new Cortex(this);
     this.inbox = new ReviewInbox(this);
     this.adaptation = new Adaptation(this);
@@ -264,6 +270,7 @@ export class Brain {
     });
     j.register("vault_sync", async () => this.folders.syncVault(), { owner: "folders" });
     j.register("sleep_cycle", async (job, signal) => this.sleepCycle(signal, !!job.payload?.manual), { owner: "metamorphosis" });
+    j.register("session_handoff", async (job, signal) => this.sessionHandoff(job.payload, signal), { owner: "sessions", timeoutMs: 5 * 60_000 });
     j.register("transfer_refresh", async (job) => this.adaptation.refreshTransfer(job.payload.project_id), { owner: "projects" });
     this.cortex.registerJobs();
     j.heldSql = () => this.heldJobsSql();
@@ -360,6 +367,50 @@ export class Brain {
     });
     if (rows.length === limit) this.jobs.enqueue("embed_remote", { limit }, { dedupe: "embed_remote", delayMs: 2000, priority: 7 });
     return { embedded: rows.length, model: p.id };
+  }
+
+  /**
+   * Automatic handoff for a finished Claude Code session (SessionEnd hook → job). Uses the local AI (or the cloud
+   * fallback only if the user authorised it) to structure the transcript; the result is validated and saved with the
+   * key "claude-code:<session id>", so a re-run updates the same handoff. Without AI nothing is invented: the job
+   * finishes as "skipped" with the reason, and the manual "Save handoff" route still works.
+   */
+  async sessionHandoff(payload: { transcript_path: string; session_id: string; cwd?: string }, signal?: AbortSignal): Promise<Row> {
+    if (!this.settings.get("sessions.autoHandoff")) return { skipped: "Automatic handoffs are turned off" };
+    if (this.privacyMode()) return { skipped: "Privacy Mode is on" };
+    const ready = this.cortex.readiness();
+    if (!ready.ok && !this.cortex.router.status().cloud.ok) {
+      this.store.logActivity({ kind: "handoff", source: "claude_code", action: "skipped", detail: { reason: ready.reason } });
+      return { skipped: `No handoff written: ${ready.reason ?? "local AI unavailable"}. Ask Claude to call moth_save_handoff, or use Save handoff in MOTH.` };
+    }
+    const tr = readTranscript(String(payload.transcript_path));
+    if (tr.text.trim().length < 40) return { skipped: "The session was too short to summarise" };
+    // Project: the working folder's name, matched to a project name, slug or alias.
+    const base = path.basename(String(payload.cwd ?? "")).trim();
+    const project = base ? this.store.getProject(base) : null;
+    const r = await this.cortex.router.generate<{ summary: string; completed: string[]; decisions: string[]; unresolved: string[]; next_steps: string[] }>({
+      purpose: "session_handoff",
+      system: HANDOFF_SYSTEM,
+      user: `Working folder: ${base || "unknown"}\nTranscript (most recent part):\n"""\n${tr.text}\n"""`,
+      schema: HANDOFF_SCHEMA,
+      maxTokens: 700,
+      signal,
+      projectId: project?.id ?? null,
+    });
+    const saved = this.handoffs.save({
+      project: project?.id ?? null,
+      client: "claude-code",
+      session_id: String(payload.session_id),
+      summary: r.data.summary,
+      completed: r.data.completed,
+      decisions: r.data.decisions,
+      unresolved: r.data.unresolved,
+      next_steps: r.data.next_steps,
+      source: "hook",
+      confidence: 0.6,
+      created_by: `cortex (${r.provider}: ${r.model})`,
+    });
+    return { handoff_id: saved.handoff.id, outcome: saved.outcome, project: project?.name ?? null, model: r.model, provider: r.provider };
   }
 
   private async learnFromTranscript(payload: { transcript_path: string; session_id?: string }): Promise<unknown> {

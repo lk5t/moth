@@ -518,6 +518,9 @@ function Privacy({ s, set }: SP) {
         <Line label="Learn from finished Claude Code sessions" hint="Reads the session file Claude Code saves and, with AI processing on, extracts what's worth keeping. Off by default.">
           <Switch checked={s["automation.learnFromTranscripts"]} onChange={(v) => set("automation.learnFromTranscripts", v)} label="Transcript learning" />
         </Line>
+        <Line label="Write a handoff when a Claude Code session ends" hint="Uses Claude Code's SessionEnd hook: MOTH's local AI reads that session's file and saves a handoff (done, decided, open, next). Needs the local AI and the Claude Code hooks (Connections). Claude Desktop has no such hook: there, Claude saves handoffs with moth_save_handoff or you save one in a project. Off by default.">
+          <Switch checked={!!s["sessions.autoHandoff"]} onChange={(v) => set("sessions.autoHandoff", v)} label="Automatic handoffs" />
+        </Line>
       </Block>
       <div className="flex items-start gap-2 text-[12.5px] leading-relaxed text-ink-3">
         <ShieldCheck className="mt-0.5 size-4 shrink-0" />

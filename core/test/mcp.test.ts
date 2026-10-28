@@ -5,6 +5,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
 import { after, test } from "node:test";
 import { Brain } from "../src/engine/brain.ts";
+import { TOOL_NAMES } from "../src/mcp/server.ts";
 import { tmpDir } from "./helpers.ts";
 
 const ENTRY = path.resolve(import.meta.dirname, "../src/index.ts");
@@ -82,11 +83,12 @@ async function startClient(dataDir: string): Promise<McpClient> {
   return c;
 }
 
-test("MCP: lists all 24 tools with schemas", async () => {
+test("MCP: lists all tools with schemas", async () => {
   const c = await startClient(tmpDir());
   const r = await c.request("tools/list");
   const names = r.result.tools.map((t: any) => t.name).sort();
-  assert.equal(names.length, 24);
+  assert.equal(names.length, TOOL_NAMES.length);
+  assert.ok(names.includes("moth_save_handoff") && names.includes("moth_resume_project"));
   for (const t of r.result.tools) {
     assert.equal(t.inputSchema.type, "object");
     assert.ok(t.description.length > 20);
@@ -262,4 +264,44 @@ test("MCP v0.2.5: preferences, research with sources, lessons and knowledge tran
   assert.equal(blocked.isError, true);
   assert.match(JSON.stringify(blocked.data), /Privacy Mode/);
   await c2.close();
+});
+
+test("MCP (v0.4.0 test 4): session handoff saved over MCP survives a restart; duplicates are handled; resume uses it", async () => {
+  const dir = tmpDir();
+  // A project with an explicit blocker, created through MCP like a client would.
+  let c = await startClient(dir);
+  const mem = await c.call("moth_commit_learning", { summary: "Set up the payment service", project: "Shopfront", decisions: ["Use Stripe for card payments"] });
+  assert.equal(mem.isError, false, JSON.stringify(mem.data));
+  const blocker = await c.call("moth_record_project_item", { project: "Shopfront", kind: "blocker", title: "Waiting for the Stripe account approval" });
+  assert.equal(blocker.isError, false, JSON.stringify(blocker.data));
+  const args = { project: "Shopfront", session_id: "sess-42", summary: "Built checkout page and webhook handler.", completed: ["Checkout page", "Webhook handler"], decisions: ["Webhooks verified with signing secret"], unresolved: ["Refund flow not designed"], next_steps: ["Design the refund flow"] };
+  const first = await c.call("moth_save_handoff", args);
+  assert.equal(first.isError, false, JSON.stringify(first.data));
+  assert.equal(first.data.outcome, "created");
+  const again = await c.call("moth_save_handoff", args);
+  assert.equal(again.data.outcome, "unchanged", "same session + same content must not create a duplicate");
+  assert.equal(again.data.handoff.id, first.data.handoff.id);
+  const edited = await c.call("moth_save_handoff", { ...args, next_steps: ["Design the refund flow", "Write webhook tests"] });
+  assert.equal(edited.data.outcome, "updated");
+  assert.equal(edited.data.handoff.version, 2);
+  const bad = await c.call("moth_save_handoff", { ...args, session_id: "sess-43", memory_ids: ["mem_doesnotexist"] });
+  assert.equal(bad.isError, true, "references to memories that don't exist are rejected");
+  await c.close();
+
+  // Restart: a brand-new server process reads the same database.
+  c = await startClient(dir);
+  const latest = await c.call("moth_get_latest_handoff", { project: "Shopfront" });
+  assert.equal(latest.isError, false, JSON.stringify(latest.data));
+  assert.equal(latest.data.handoff.id, first.data.handoff.id);
+  assert.equal(latest.data.handoff.project, "Shopfront");
+  assert.deepEqual(latest.data.handoff.next_steps, ["Design the refund flow", "Write webhook tests"]);
+  assert.deepEqual(latest.data.handoff.completed, ["Checkout page", "Webhook handler"]);
+  const list = await c.call("moth_list_handoffs", { project: "Shopfront" });
+  assert.equal(list.data.handoffs.length, 1, "one handoff, two versions");
+  const resume = await c.call("moth_resume_project", { project: "Shopfront" });
+  assert.equal(resume.isError, false, JSON.stringify(resume.data));
+  assert.match(resume.data.briefing, /Suggested next step: Design the refund flow/);
+  assert.match(resume.data.briefing, /Waiting for the Stripe account approval/);
+  assert.equal(resume.data.data.next_step.ref.type, "handoff");
+  await c.close();
 });

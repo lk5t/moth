@@ -2,6 +2,8 @@
 //  - user-prompt (UserPromptSubmit): injects a small, relevant MOTH context block before Claude starts.
 //  - session-start (SessionStart): same, based on the working folder name.
 //  - stop (Stop): if the user enabled transcript learning, queues the finished session for learning.
+//  - session-end (SessionEnd, documented with session_id, transcript_path, cwd and a 1.5 s budget): if the user
+//    enabled automatic handoffs, queues a "session_handoff" job (the desktop app writes the handoff later).
 // Hooks must be fast and must never block Claude: every failure exits 0 silently.
 import path from "node:path";
 import type { Brain } from "./engine/brain.ts";
@@ -51,6 +53,14 @@ export async function runHook(brain: Brain, event: string): Promise<void> {
       brain.store.logActivity({ kind: "hook", source: "claude_code", action: event, duration_ms: Date.now() - started, detail: { items: pkg.stats.items, project: pkg.project?.name ?? null } });
       if (!text) return;
       process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event === "user-prompt" ? "UserPromptSubmit" : "SessionStart", additionalContext: text } }));
+    } else if (event === "session-end") {
+      const on = brain.settings.get("sessions.autoHandoff");
+      if (!on || !input.transcript_path || !input.session_id) {
+        brain.store.logActivity({ kind: "hook", source: "claude_code", action: "session_end", detail: { queued: false, reason: !on ? "automatic handoffs are off" : "no transcript or session id" } });
+        return;
+      }
+      const id = brain.jobs.enqueue("session_handoff", { transcript_path: String(input.transcript_path), session_id: String(input.session_id), cwd: String(input.cwd ?? ""), reason: String(input.reason ?? "") }, { dedupe: `handoff:${input.session_id}`, delayMs: 2000, owner: "sessions", title: "Write session handoff (Claude Code)" });
+      brain.store.logActivity({ kind: "hook", source: "claude_code", action: "session_end", detail: { queued: id !== null, job_id: id } });
     } else if (event === "stop") {
       if (input.stop_hook_active) return;
       if (!brain.settings.get("automation.learnFromTranscripts") || !input.transcript_path) {

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Badge, Button, Dialog, Empty, Field, Input, PageHeader, Switch, Textarea } from "../components/ui";
 import { GraphCanvas } from "../graph/GraphCanvas";
 import { ReviewList } from "../components/ReviewList";
+import { HandoffDialog, HandoffsCard, ProgressLine, ProjectItemsCard, ResumePanel } from "../components/ProjectIntel";
 import { renderInline } from "../components/MemoryPanel";
 import { rpc } from "../lib/api";
 import { useApp } from "../lib/app";
@@ -119,6 +120,8 @@ function ProjectDashboard({ id, onBack }: { id: string; onBack: () => void }) {
   const { data: research } = useLive<any>("memories.list", { project_id: id, memory_type: "research", status: "active", limit: 12 }, { entities: ["memory"] });
   const { data: reviews, reload: reloadReviews } = useLive<any[]>("inbox.list", {}, { entities: ["review" as any] });
   const [suggestions, setSuggestions] = useState<any[] | null>(null);
+  const { data: pstate } = useLive<any>("projects.state", { project: id }, { entities: ["memory", "project_item", "handoff", "project"] });
+  const [handoff, setHandoff] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
   const loadTransfer = async (refresh: boolean) => {
     try {
@@ -191,6 +194,7 @@ function ProjectDashboard({ id, onBack }: { id: string; onBack: () => void }) {
         }
       />
       <div className="grid gap-4 px-8 pb-10 xl:grid-cols-3">
+        <ResumePanel projectId={id} onOpenHandoff={setHandoff} />
         {p.transfer_enabled && suggestions && suggestions.length ? (
           <section className="panel border-[color-mix(in_srgb,var(--color-accent)_35%,transparent)] p-4 xl:col-span-3">
             <div className="flex flex-wrap items-center gap-2">
@@ -234,8 +238,14 @@ function ProjectDashboard({ id, onBack }: { id: string; onBack: () => void }) {
           {p.goals ? <p className="mt-2 text-[13px] text-ink-2">Goals: {p.goals}</p> : null}
           <p className="mt-3 text-[12px] text-ink-3">
             {plural(data.counts.memories, "memory", "memories")}, {plural(data.counts.tasks_recorded, "Claude session")}, last activity {timeAgo(p.last_activity_at)}
+            {pstate?.last_meaningful_activity ? ` (${pstate.last_meaningful_activity.what})` : ""}
           </p>
+          <div className="mt-3">
+            <ProgressLine progress={pstate?.progress} />
+          </div>
         </Card>
+        <HandoffsCard projectId={id} />
+        <ProjectItemsCard projectId={id} className="xl:col-span-2" />
         <Card title={`Open tasks (${data.open_tasks.length})`}>
           <MemList items={data.open_tasks} empty="Nothing unfinished." />
         </Card>
@@ -336,6 +346,7 @@ function ProjectDashboard({ id, onBack }: { id: string; onBack: () => void }) {
         </Card>
       </div>
       {editing ? <ProjectDialog open project={p} onClose={() => setEditing(false)} /> : null}
+      {handoff ? <HandoffDialog open handoffId={handoff} onClose={() => setHandoff(null)} /> : null}
     </div>
   );
 }

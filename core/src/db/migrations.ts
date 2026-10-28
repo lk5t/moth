@@ -644,6 +644,82 @@ CREATE TRIGGER trg_find_upd AFTER UPDATE OF status ON findings WHEN OLD.status I
 END;
 `,
   },
+  {
+    // v0.4.0 — Milestone 2: structured project state. Decisions, open/completed tasks, research and lessons stay
+    // memories; these are the things memories didn't capture: objectives, unresolved decisions, blockers, milestones.
+    version: 5,
+    name: "project_state",
+    sql: `
+CREATE TABLE project_items (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('objective','unresolved_decision','blocker','milestone')),
+  title TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','resolved','done','dropped')),
+  resolution TEXT,
+  resolution_memory_id TEXT REFERENCES memories(id) ON DELETE SET NULL,
+  memory_id TEXT REFERENCES memories(id) ON DELETE SET NULL,
+  source TEXT NOT NULL DEFAULT 'user',
+  source_ref TEXT,
+  created_by TEXT NOT NULL DEFAULT 'user',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+CREATE INDEX idx_pitems_project ON project_items(project_id, kind, status);
+CREATE TRIGGER trg_pitem_ins AFTER INSERT ON project_items BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('project_item', NEW.id, 'insert');
+  UPDATE projects SET last_activity_at = NEW.created_at WHERE id = NEW.project_id;
+END;
+CREATE TRIGGER trg_pitem_upd AFTER UPDATE ON project_items BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('project_item', NEW.id, 'update');
+END;
+
+-- Session handoffs (Session Continuity): what was done, decided, left open and what's next, per session.
+-- idempotency_key makes repeated submissions (hook retries, a client calling twice) update one handoff
+-- instead of creating duplicates. Every edit keeps the previous content in handoff_versions.
+CREATE TABLE handoffs (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  client TEXT NOT NULL DEFAULT 'manual',
+  session_id TEXT,
+  idempotency_key TEXT,
+  summary TEXT NOT NULL,
+  completed TEXT NOT NULL DEFAULT '[]',
+  decisions TEXT NOT NULL DEFAULT '[]',
+  unresolved TEXT NOT NULL DEFAULT '[]',
+  next_steps TEXT NOT NULL DEFAULT '[]',
+  memory_ids TEXT NOT NULL DEFAULT '[]',
+  source TEXT NOT NULL DEFAULT 'manual',
+  confidence REAL,
+  created_by TEXT NOT NULL DEFAULT 'user',
+  version INTEGER NOT NULL DEFAULT 1,
+  content_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX idx_handoffs_idem ON handoffs(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX idx_handoffs_project ON handoffs(project_id, created_at DESC);
+CREATE TABLE handoff_versions (
+  handoff_id TEXT NOT NULL REFERENCES handoffs(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  snapshot TEXT NOT NULL,
+  changed_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (handoff_id, version)
+);
+CREATE TRIGGER trg_handoff_ins AFTER INSERT ON handoffs BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('handoff', NEW.id, 'insert');
+  UPDATE projects SET last_activity_at = NEW.created_at WHERE id = NEW.project_id;
+END;
+CREATE TRIGGER trg_handoff_upd AFTER UPDATE ON handoffs BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('handoff', NEW.id, 'update');
+END;
+`,
+  },
 ];
 
 export function runMigrations(db: Database): void {
