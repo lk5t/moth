@@ -17,6 +17,8 @@ import { JobQueue } from "./jobs.ts";
 import { Findings } from "../intelligence/findings.ts";
 import { HANDOFF_SCHEMA, HANDOFF_SYSTEM, Handoffs, readTranscript } from "../intelligence/handoffs.ts";
 import { ProjectIntel } from "../intelligence/projects.ts";
+import { Awareness, knowledgeChangeMark } from "../intelligence/awareness.ts";
+import { KnowledgeHealth } from "../intelligence/health.ts";
 import { Permissions } from "../intelligence/permissions.ts";
 import { LearningEngine, type LearningInput } from "./learning.ts";
 import { Metamorphosis } from "./metamorphosis.ts";
@@ -49,6 +51,9 @@ export class Brain {
   readonly findings: Findings;
   readonly handoffs: Handoffs;
   readonly projectIntel: ProjectIntel;
+  readonly awareness: Awareness;
+  readonly health: KnowledgeHealth;
+  private awarenessMark = -1;
   readonly paths: MothPaths;
   /** Reported by the desktop shell (Windows idle time and power state); null when unknown. */
   system: { idleSeconds: number | null; onBattery: boolean | null; batterySaver: boolean | null; updatedAt: number } = { idleSeconds: null, onBattery: null, batterySaver: null, updatedAt: 0 };
@@ -86,6 +91,9 @@ export class Brain {
     this.adaptation = new Adaptation(this);
     this.adaptation.registerInboxHandlers();
     this.cortex.registerOrganizeHandlers();
+    this.awareness = new Awareness(this);
+    this.health = new KnowledgeHealth(this);
+    this.health.registerHandlers();
     this.folders = new WatchedFolders(this);
     this.refreshEmbeddingProvider();
     if (this.recovered) {
@@ -253,6 +261,14 @@ export class Brain {
   }
 
   // ------------------------------------------------------------------ background engine (app process only)
+  /** Proactive intelligence job kinds (also used directly by tests). Scans are idempotent, so they may resume. */
+  registerIntelligenceJobs(): void {
+    const j = this.jobs;
+    j.register("intel_awareness_scan", async (job, signal) => this.awareness.scan({ as: job.payload?.as ?? "background", project: job.payload?.project ?? null, signal, jobId: job.id }), { owner: "awareness", timeoutMs: 5 * 60_000 });
+    j.register("intel_health_scan", async (job, signal) => this.health.scan({ as: job.payload?.as ?? "background", checks: job.payload?.checks, signal, jobId: job.id }), { owner: "health", timeoutMs: 10 * 60_000 });
+    j.heldSql = () => this.heldJobsSql();
+  }
+
   startBackground(): void {
     const j = this.jobs;
     j.register("reflect", async (_job, signal) => this.meta.reflect({ signal }), { owner: "metamorphosis" });
@@ -270,6 +286,7 @@ export class Brain {
     });
     j.register("vault_sync", async () => this.folders.syncVault(), { owner: "folders" });
     j.register("sleep_cycle", async (job, signal) => this.sleepCycle(signal, !!job.payload?.manual), { owner: "metamorphosis" });
+    this.registerIntelligenceJobs();
     j.register("session_handoff", async (job, signal) => this.sessionHandoff(job.payload, signal), { owner: "sessions", timeoutMs: 5 * 60_000 });
     j.register("transfer_refresh", async (job) => this.adaptation.refreshTransfer(job.payload.project_id), { owner: "projects" });
     this.cortex.registerJobs();
@@ -296,6 +313,16 @@ export class Brain {
       const pending = this.inbox.counts().pending as number;
       if (pending >= 5) this.notify("important", "Review queue needs attention", `${pending} proposed memory changes are waiting for your decision.`, "review-queue");
       if (this.search.remote) j.enqueue("embed_remote", { limit: 64 }, { dedupe: "embed_remote", priority: 7 });
+      // Event-driven awareness: only when knowledge changed since the last scan (no idle loops). Health: daily.
+      if (this.settings.get("intelligence.background")) {
+        const mark = knowledgeChangeMark(this);
+        if (mark !== this.awarenessMark) {
+          this.awarenessMark = mark;
+          j.enqueue("intel_awareness_scan", { as: "background" }, { dedupe: "intel_awareness_scan", priority: 7, scope: "background", owner: "awareness", title: "Awareness scan" });
+        }
+        const lastHealth = this.db.value<string>("SELECT MAX(created_at) FROM activity_logs WHERE kind = 'health' AND action = 'scan'");
+        if (!lastHealth || Date.now() - Date.parse(lastHealth) > 24 * 3_600_000) j.enqueue("intel_health_scan", { as: "background" }, { dedupe: "intel_health_scan", priority: 8, scope: "background", owner: "health", title: "Knowledge health check" });
+      }
       if (this.settings.get("backup.auto")) {
         const last = listBackupFiles(this.paths.backups).find((b) => b.name.startsWith("auto-"));
         const due = !last || Date.now() - last.mtime > this.settings.get("backup.intervalHours") * 3_600_000;

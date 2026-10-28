@@ -238,6 +238,13 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
     "handoffs.save": (p: any) => b().handoffs.save({ ...p, client: "manual", source: "manual", created_by: "user" }),
     "handoffs.edit": (p: { id: string; patch: any }) => b().handoffs.edit(req(p.id, "id"), p.patch ?? {}, "user"),
     "handoffs.delete": (p: { id: string }) => (b().handoffs.remove(req(p.id, "id")), { ok: true }),
+    // Awareness + Knowledge Health (manual runs are jobs too, so they can be followed and cancelled)
+    "awareness.scan": (p: { project?: string } = {}) => ({ job_id: b().jobs.enqueue("intel_awareness_scan", { as: "user", project: p?.project ?? null }, { dedupe: `intel_awareness_manual:${p?.project ?? "*"}`, priority: 3, scope: "manual", owner: "awareness", title: "Awareness scan (manual)", projectId: p?.project ? b().store.requireProject(p.project).id : null }) }),
+    "health.scan": (p: { checks?: string[] } = {}) => ({ job_id: b().jobs.enqueue("intel_health_scan", { as: "user", checks: p?.checks }, { dedupe: "intel_health_manual", priority: 3, scope: "manual", owner: "health", title: "Knowledge health check (manual)" }) }),
+    "health.summary": () => b().health.summary(),
+    "health.repairs": (p: { limit?: number } = {}) => b().health.repairs(p?.limit ?? 50),
+    "health.propose": (p: { id: number }) => b().health.propose(Number(p.id), "user"),
+    "findings.confirm": (p: { id: number; note?: string }) => b().findings.confirm(Number(p.id), p.note),
     "findings.list": (p: { kind?: FindingKind; status?: any; project_id?: string; category?: string; limit?: number } = {}) => b().findings.list(p ?? {}),
     "findings.get": (p: { id: number }) => b().findings.get(Number(p.id)),
     "findings.counts": () => b().findings.counts(),

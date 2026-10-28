@@ -48,6 +48,8 @@ export interface FindingInput {
   action?: Record<string, unknown> | null;
   job_id?: number | null;
   agent?: string | null;
+  /** A problem with MOTH's own derived data (e.g. the search index): no memory or project is involved. */
+  system?: boolean;
 }
 
 export interface UpsertResult {
@@ -89,7 +91,7 @@ export class Findings {
     const known = new Set(existing.map((r) => r.id as string));
     const missing = ids.filter((x) => !known.has(x));
     if (missing.length) return { id: null, outcome: "rejected", reason: `Evidence refers to memories that don't exist: ${missing.slice(0, 3).join(", ")}` };
-    if (!ids.length && !(input.project_id || input.project_ids?.length)) return { id: null, outcome: "rejected", reason: "A finding needs supporting memories or a project" };
+    if (!ids.length && !(input.project_id || input.project_ids?.length) && !input.system) return { id: null, outcome: "rejected", reason: "A finding needs supporting memories or a project" };
     const projIds = [...new Set([...(input.project_ids ?? []), ...(input.project_id ? [input.project_id] : [])])];
     for (const p of projIds) if (!this.db.value("SELECT 1 FROM projects WHERE id = ? AND user_id = ?", [p, uid])) return { id: null, outcome: "rejected", reason: `Unknown project ${p}` };
     const evidence = input.evidence.filter((e) => !e.memory_id || known.has(e.memory_id)).slice(0, 20).map((e) => ({ ...e, quote: e.quote?.slice(0, 400), note: String(e.note ?? "").slice(0, 400) }));

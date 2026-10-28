@@ -15,6 +15,7 @@ import { AdaptationPage } from "./pages/Adaptation";
 import { ConnectionsPage } from "./pages/Connections";
 import { CortexPage } from "./pages/Cortex";
 import { GuidePage } from "./pages/Guide";
+import { HealthPage } from "./pages/Health";
 import { ActivityPage, TimelinePage } from "./pages/History";
 import { InboxPage } from "./pages/Inbox";
 import { MemoriesPage } from "./pages/Memories";
@@ -199,6 +200,7 @@ function Workspace({ firstMemory, onRestartFirstFlight }: { firstMemory?: string
     connections: ConnectionsPage,
     settings: SettingsPage,
     guide: GuidePage,
+    health: HealthPage,
   };
   const Page = pages[page];
   return (

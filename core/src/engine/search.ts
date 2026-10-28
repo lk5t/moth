@@ -149,6 +149,11 @@ export class SearchEngine {
     return { scores: new Map(scored.slice(0, limit).map(([id, s]) => [id, Math.min(1, s * scale)])), model };
   }
 
+  /** The cached local similarity vectors of the user's memories (id → vector). Read-only use. */
+  vectors(): Map<string, Float32Array> {
+    return this.cache.load(this.db, LOCAL_MODEL, this.store.userId);
+  }
+
   similarTo(memoryId: string, limit = 10, model = LOCAL_MODEL): { id: string; score: number }[] {
     const vecs = this.cache.load(this.db, model, this.store.userId);
     const v = vecs.get(memoryId);

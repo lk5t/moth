@@ -189,7 +189,8 @@ export class MemoryStore {
     );
   }
 
-  private embedLocal(id: string, m: { title: string; content: string; summary: string; tags: string[] }): void {
+  /** Recomputes the local (word-based) similarity vector of a memory. Deterministic: safe to rerun any time. */
+  embedLocal(id: string, m: { title: string; content: string; summary: string; tags: string[] }): void {
     const text = embeddingText(m);
     const hash = hashText(text);
     const v = localEmbed(text);

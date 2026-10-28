@@ -1,4 +1,4 @@
-import { Activity, BookOpenCheck, Brain, Cable, ChevronRight, CircleHelp, Clock3, Copy, Cpu, FolderKanban, Inbox, LayoutDashboard, Library, Minus, Moon, PanelLeftClose, PanelLeftOpen, Search, Settings, ShieldOff, Square, UserRound, X, Zap } from "lucide-react";
+import { Activity, BookOpenCheck, HeartPulse, Brain, Cable, ChevronRight, CircleHelp, Clock3, Copy, Cpu, FolderKanban, Inbox, LayoutDashboard, Library, Minus, Moon, PanelLeftClose, PanelLeftOpen, Search, Settings, ShieldOff, Square, UserRound, X, Zap } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState, type ReactNode } from "react";
 import { isTauri, onConnection } from "../lib/api";
@@ -19,11 +19,18 @@ export const NAV: NavItem[] = [
   { page: "mind", label: "The Mind", icon: <Brain />, key: "2" },
   { page: "memories", label: "Memories", icon: <Library />, key: "3" },
   { page: "projects", label: "Projects", icon: <FolderKanban />, key: "4" },
-  { page: "cortex", label: "Cortex", icon: <Cpu />, key: "5" },
+  { page: "health", label: "Knowledge Health", icon: <HeartPulse />, key: "5" },
   { page: "inbox", label: "Review Queue", icon: <Inbox />, key: "6" },
-  { page: "adaptation", label: "About Me", icon: <UserRound />, key: "7" },
-  { page: "research", label: "Research Library", icon: <BookOpenCheck />, key: "8" },
-  { page: "timeline", label: "Timeline", icon: <Clock3 />, key: "9" },
+  { page: "cortex", label: "Cortex", icon: <Cpu />, key: "7" },
+  { page: "adaptation", label: "About Me", icon: <UserRound />, key: "8" },
+  { page: "research", label: "Research Library", icon: <BookOpenCheck />, key: "9" },
+  { page: "timeline", label: "Timeline", icon: <Clock3 />, key: "" },
+];
+/** Sidebar groups (by page, so Ctrl+1…9 can follow NAV's order independently). */
+const GROUPS: { label: string | null; pages: Page[] }[] = [
+  { label: null, pages: ["overview", "mind", "memories", "projects"] },
+  { label: "Intelligence", pages: ["health", "inbox", "cortex"] },
+  { label: "Knowledge", pages: ["adaptation", "research", "timeline"] },
 ];
 const SYSTEM: NavItem[] = [
   { page: "connections", label: "Connections", icon: <Cable />, key: "" },
@@ -152,9 +159,12 @@ export function Sidebar() {
       aria-label="Main"
     >
       <div className="flex flex-col gap-0.5 px-2">
-        {NAV.slice(0, 5).map(item)}
-        {section("Knowledge")}
-        {NAV.slice(5).map(item)}
+        {GROUPS.map((g, gi) => (
+          <div key={gi} className="contents">
+            {g.label ? section(g.label) : null}
+            {g.pages.map((pg) => NAV.find((n) => n.page === pg)).filter(Boolean).map((n) => item(n!))}
+          </div>
+        ))}
         {section("System")}
         {SYSTEM.map(item)}
         {!collapsed ? (
