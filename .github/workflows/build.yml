@@ -66,6 +66,11 @@ jobs:
         run: |
           [ -f real-ai-data/evidence.json ] && cat real-ai-data/evidence.json
           node .github/evidence.mjs real-ai-data/evidence.json
+      # A separate step: GitHub shows at most 10 notices per step.
+      - name: Publish intelligence evidence (agents, automatic handoff, cancellation)
+        if: always()
+        shell: bash
+        run: |
           [ -f real-ai-data/evidence-intel.json ] && cat real-ai-data/evidence-intel.json && node .github/evidence.mjs real-ai-data/evidence-intel.json || true
 
   windows:
