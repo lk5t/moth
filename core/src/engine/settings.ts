@@ -88,6 +88,7 @@ export const DEFAULT_SETTINGS = {
   "sessions.autoHandoff": false,
   // v0.4.0 Discovery (quiet mode): only suggestions at least this confident are shown.
   "discovery.minConfidence": 0.6,
+  "discovery.maxPerKind": 30,
   // v0.4.0 Agents: per-agent { enabled, background, everyHours, maxItems } overrides (defaults in agents.ts).
   "agents.config": {} as Record<string, { enabled?: boolean; background?: boolean; everyHours?: number; maxItems?: number }>,
   "appearance.sidebarCollapsed": false,

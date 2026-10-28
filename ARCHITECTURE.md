@@ -206,3 +206,117 @@ Tray menu: Open MOTH, Open The Mind, Open Cortex, Quick Capture, Pause/Resume Le
   motion Minimal / Windows "reduce animations": nothing drifts or breathes (measured 0 redraws while idle).
 - **Smoothness check:** The Mind → graph settings → "Check smoothness" moves the view, zooms and hovers by itself
   and reports real frames per second on the current computer (`GraphHandle.measure`).
+
+## v0.4.0 — Consciousness (proactive intelligence on stored knowledge)
+
+Nothing in v0.4.0 is sentient or watches conversations. Every feature below works on what is stored in MOTH's
+database, and every result points back at the stored records it came from.
+
+### Database migrations (automatic, keep all existing data)
+- **v4 `intelligence_foundation`:** `jobs` rebuilt (SQLite can't change a CHECK constraint in place; every row is
+  copied) with the states `pending, running, done, failed, cancelled, interrupted, awaiting_approval`, plus owner,
+  scope, title, time limit and timestamps; `job_steps` (checkpoints); `permissions`; `findings`.
+- **v5 `project_state`:** `project_items` (objective / unresolved decision / blocker / milestone), `handoffs` and
+  `handoff_versions`. Triggers feed the change feed (`project_item`, `handoff`) and the project's last activity.
+- Decisions, tasks, research and lessons remain memories; project items hold only what memories didn't capture.
+
+### Durable jobs (`engine/jobs.ts`)
+- Every background task is a row. Restart recovery: jobs that were running when MOTH stopped become
+  `interrupted`; only kinds registered as resumable are re-queued automatically, and they continue from their
+  last checkpoint (`ctx.step(key, fn)` stores each finished step in `job_steps`, so a step never runs twice).
+- Cancellation passes an `AbortSignal` down to the local model request. A `permission_denied` error fails the job
+  immediately (no retries). `awaitingApproval(result)` parks a job in `awaiting_approval` until every review it
+  created is decided (database trigger).
+- Held work: intelligence jobs wait while Privacy Mode or Pause Learning is on; background-scope work also waits
+  while the computer is busy, on battery with the Eco profile, or when background intelligence is off.
+- No progress percentages are shown anywhere: the UI shows the real state, the running time and the result.
+
+### Permissions (`intelligence/permissions.ts`)
+- Subjects: `background`, `agent:<id>` (automated) and `client:<app>` (connected apps; the name without version,
+  e.g. `client:claude-ai`, `client:claude-code`).
+- Automated subjects: read memories / read project data / create analysis / propose changes / apply safe changes
+  (all default on); read approved folders, internet (default off); **change important knowledge and external
+  tools can never be granted** (they always go through the review queue). Private projects are excluded from
+  automated work unless allowed per project.
+- Connected apps: read memories, read project data, save and change memories (default on), with per-project
+  exceptions. Resolution order: project rule → general rule → default. Every denial is written to the activity log.
+- Enforced in the engine, not the UI: every agent/background action calls `assert()`; every MCP tool call goes
+  through `mcp/access.ts` (below).
+
+### MCP (`mcp/server.ts`, 30 tools)
+- New tools: `moth_save_handoff`, `moth_get_latest_handoff`, `moth_list_handoffs`, `moth_resume_project`,
+  `moth_record_project_item`, `moth_resolve_project_item`.
+- `ClientAccess` (per call): before the tool runs, reading needs `read_memories` and changing needs
+  `write_memories` — globally, for the project the tool names, and for the project of every memory id passed in.
+  After it runs, memories and projects the app may not read are removed wherever they appear in the result, and
+  the result carries `withheld: {count, note}`. A single requested memory the app may not read is a
+  `permission_denied` error rather than an empty answer.
+- Handoff saves are idempotent (client + session id, or an explicit key): unchanged content is reported as
+  `unchanged`, changed content becomes a new version (earlier versions kept). References to memories that don't
+  exist are rejected.
+
+### Supported vs unsupported client automation (honest)
+- **Claude Code:** the documented `SessionEnd` hook (fields `session_id`, `transcript_path`, `cwd`) can queue an
+  automatic handoff job — only when Settings → "Write a handoff when a Claude Code session ends" is on, Privacy Mode
+  is off and the local model is ready. The hook only enqueues (it must return within its time budget); the job
+  reads the transcript file locally and writes the handoff with the local model, marked `source: hook`,
+  confidence 0.6. The `UserPromptSubmit` hook adds relevant memories before each prompt (unchanged from v0.2).
+- **Claude Desktop:** has no lifecycle hooks. Handoffs happen only when Claude calls `moth_save_handoff` (the server
+  instructions ask it to at the end of a session) or when you write one in Projects. MOTH cannot observe Desktop
+  conversations and doesn't claim to.
+- MOTH never claims context reached Claude unless a tool call or hook actually returned it (visible in Connections →
+  recent tool calls).
+
+### Findings (`intelligence/findings.ts`)
+- One table for awareness, health, discovery and agent results. Each finding has a fingerprint (what it is about)
+  and an evidence hash (memory ids @ version + extra facts). No duplicate active findings; a dismissed finding
+  stays dismissed until its evidence changes; `reconcile()` resolves findings a complete scan no longer detects,
+  with the reason recorded. Findings must cite existing memories or projects (or be marked `system`, e.g. the
+  search index).
+
+### Intelligence modules
+- **Project Intelligence** (`projects.ts`): project state, progress only from milestones or tasks (otherwise
+  "unknown", never a guess), deterministic resume (last completed, decisions, unresolved, helpful research with
+  the reason it's included, and a next step chosen from: latest handoff → oldest blocker → oldest unresolved
+  decision → oldest open task).
+- **Awareness** (`awareness.ts`): unresolved decisions, blockers, unfinished work, knowledge gaps, research to
+  review, relevant lessons, conflicting requirements. Runs when the knowledge change mark moves (no idle loop).
+- **Knowledge Health** (`health.ts`): 11 checks. Automatic repairs only for derived data that can always be
+  recreated (search index rebuild, similarity vectors), each logged as `health_repair`; everything else is a
+  proposal in the review queue. The possible-duplicates check is incremental: after a complete pass, only
+  memories created or edited since then are compared (a full pass runs weekly).
+- **Discovery** (`discovery.ts`, quiet mode): cross-project knowledge, stored knowledge that may answer an open
+  question, independent support for decisions. Candidates come from the full-text index using each memory's most
+  distinctive words (`SearchEngine.candidates`), then word-vector similarity and shared words. Confidence =
+  `min(0.95, 0.25 + 0.55·clamp((sim−0.2)/0.5) + 0.05·min(4, shared words))`; the threshold rises for categories you
+  keep dismissing. At most `discovery.maxPerKind` (30) are stored per kind, most confident first, and at most 3 per
+  memory. Confirming creates a real relationship with provenance.
+- **Agents** (`agents.ts`): Research Analyst, Memory Curator, Project Analyst, Knowledge Connector — jobs owned by
+  `agent:<id>` on the same queue and the same local model (one job at a time). Model output is schema-validated
+  and checked against the stored text (quotes must exist verbatim, citations only from the note's own sources);
+  consequential changes wait in the review queue.
+- Long scans hand control back to the event loop at least every ~30 ms so the app stays responsive.
+
+### The Mind 3.0 (`mindtime.ts`, `GraphCanvas`, `pages/MindLenses.tsx`)
+- **Paths:** breadth-first search over stored active relationships (≤ 6 hops); each step shows the stored
+  relationship, its direction and reason. No path → "MOTH doesn't invent one".
+- **History:** the graph at a past moment is rebuilt from `memory_versions` (title and status as they were),
+  relationship creation times, and removed relationships restored from their `unlinked` events. Steps are only the
+  days on which something changed. Permanently deleted memories can't be shown.
+- **Suggestions** (dashed, never part of the layout) come from active discoveries; **attention** rings from active
+  awareness findings. Both are off unless toggled.
+
+### MOTH Connect and Pulse 2.0
+- Client states come from evidence only: configuration files, recorded MCP sessions (live process / recent HTTP),
+  logged tool calls and the last self-test → connected, disconnected, error, authorization required, configured,
+  restart required, not configured — each with the evidence lines shown in Connections.
+- Diagnostics start MOTH's MCP server like a client and run real tool calls: tool discovery, a tool invocation,
+  memory retrieval (search), handoff retrieval, and error handling (a missing memory must return `not_found`).
+- `pulse.intelligence`: counts are plain SQL (active projects, unresolved decisions, pending reviews, discoveries
+  ≥ 75 % confidence, blockers, awareness items, health issues); feeds list stored findings, agent jobs and the
+  per-project resume.
+
+### Performance
+- `core/scripts/bench.ts` measures the real engine on generated data at any size (build, startup, search, graph,
+  Pulse, Mind queries, scans, agents, memory, idle CPU). Results for v0.4.0 are in `docs/benchmarks/` and the
+  release notes; CI runs it on Windows (100 and 1,000 memories) and publishes the numbers as annotations.

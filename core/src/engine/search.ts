@@ -95,10 +95,26 @@ export class SearchEngine {
     return terms.slice(0, 24).map((t) => `"${t.replace(/"/g, "")}"*`).join(" OR ");
   }
 
+  /**
+   * Fast candidate lookup for background checks (near-duplicates, related knowledge): only the few most distinctive
+   * words of the text, matched as whole words (no prefix expansion), ranked by bm25. Much cheaper than keyword()
+   * when it runs once per memory over a large collection.
+   */
+  candidates(text: string, limit = 12, df?: Map<string, number>, maxTerms = 8): Map<string, number> {
+    const words = uniq(rawWords(text)).filter((t) => t.length > 2 && tokenize(t).length > 0);
+    if (!words.length) return new Map();
+    const ranked = words.sort((a, b) => (df?.get(a) ?? 0) - (df?.get(b) ?? 0) || b.length - a.length).slice(0, maxTerms);
+    return this.runFts(ranked.map((t) => `"${t.replace(/"/g, "")}"`).join(" OR "), limit);
+  }
+
   keyword(q: string, limit = 60): Map<string, number> {
     const fq = this.ftsQuery(q);
+    if (!fq) return new Map();
+    return this.runFts(fq, limit);
+  }
+
+  private runFts(fq: string, limit: number): Map<string, number> {
     const out = new Map<string, number>();
-    if (!fq) return out;
     let rows: Row[] = [];
     try {
       rows = this.db.all<Row>(
@@ -269,4 +285,16 @@ export class SearchEngine {
     out.sort((a, b) => b.score - a.score);
     return out.slice(0, limit);
   }
+}
+
+/** Lower-cased words as the full-text index sees them (before stemming). */
+export function rawWords(text: string): string[] {
+  return text.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").match(/[\p{L}\p{N}]{2,}/gu) ?? [];
+}
+
+/** How many of the given texts contain each word (for picking distinctive words). */
+export function documentFrequency(texts: Iterable<string>): Map<string, number> {
+  const df = new Map<string, number>();
+  for (const t of texts) for (const w of new Set(rawWords(t))) df.set(w, (df.get(w) ?? 0) + 1);
+  return df;
 }

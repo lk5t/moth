@@ -95,6 +95,13 @@ jobs:
         shell: bash
         run: .github/ci-run.sh "Windows engine tests" npm --prefix core test
 
+      - name: Performance benchmark on Windows (real engine, generated data)
+        continue-on-error: true
+        shell: bash
+        run: |
+          node --experimental-transform-types --disable-warning=ExperimentalWarning core/scripts/bench.ts 100 1000 --out bench-windows.json
+          node -e "const r=require('./bench-windows.json');for(const x of r.results)console.log('::notice title=Benchmark Windows '+x.memories+' memories::'+JSON.stringify(x));console.log('::notice title=Benchmark Windows environment::'+JSON.stringify(r.env))"
+
       - name: Build memory engine sidecar (Node single executable)
         shell: bash
         run: |

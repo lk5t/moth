@@ -1,0 +1,155 @@
+{
+  "env": {
+    "node": "v22.22.0",
+    "platform": "linux 6.18.44-fc-v180",
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+    "cores": 2,
+    "at": "2026-10-28T06:14:17.285Z"
+  },
+  "results": [
+    {
+      "memories": 100,
+      "projects": 5,
+      "connections": 215,
+      "build_ms_per_memory": 2.3,
+      "startup": {
+        "open_database_ms": 4.5,
+        "mcp_server_ready_ms": 562.5
+      },
+      "query_ms": {
+        "hybrid_search_p50": 2.7,
+        "hybrid_search_p95": 3.7,
+        "keyword_p50": 0.3,
+        "keyword_p95": 0.3,
+        "graph_load": 3.3,
+        "pulse": 17,
+        "pulse_intelligence": 20.6,
+        "mind_path_p95": 1.9,
+        "mind_history": 1,
+        "edit_memory_p50": 0.6,
+        "edit_memory_p95": 9.7
+      },
+      "job_ms": {
+        "longest_block_during_scans": 31.5,
+        "longest_block_by_scan": {
+          "awareness_scan": 9.6,
+          "health_scan": 0,
+          "health_scan_after_20_edits": 0,
+          "discovery_scan": 31.5
+        },
+        "awareness_scan": 54.2,
+        "health_scan": 74.2,
+        "health_scan_after_20_edits": 36.2,
+        "discovery_scan": 106.4,
+        "agents": {
+          "memory_curator": 19.4,
+          "project_analyst": 15.8,
+          "knowledge_connector": 83.6,
+          "research_analyst": 16.7
+        }
+      },
+      "memory": {
+        "process_rss_mb": 131.6,
+        "database_mb": 1.2
+      },
+      "idle_cpu_percent": 0.1,
+      "first_background_round_ms": 31022
+    },
+    {
+      "memories": 1000,
+      "projects": 16,
+      "connections": 2234,
+      "build_ms_per_memory": 1.9,
+      "startup": {
+        "open_database_ms": 16.4,
+        "mcp_server_ready_ms": 593.1
+      },
+      "query_ms": {
+        "hybrid_search_p50": 8.6,
+        "hybrid_search_p95": 11.2,
+        "keyword_p50": 1.4,
+        "keyword_p95": 3.9,
+        "graph_load": 25.6,
+        "pulse": 14.4,
+        "pulse_intelligence": 38.3,
+        "mind_path_p95": 3.8,
+        "mind_history": 11.2,
+        "edit_memory_p50": 0.8,
+        "edit_memory_p95": 9.3
+      },
+      "job_ms": {
+        "longest_block_during_scans": 39.6,
+        "longest_block_by_scan": {
+          "awareness_scan": 11.5,
+          "health_scan": 34.4,
+          "health_scan_after_20_edits": 0,
+          "discovery_scan": 39.6
+        },
+        "awareness_scan": 96.9,
+        "health_scan": 810.6,
+        "health_scan_after_20_edits": 123,
+        "discovery_scan": 1651.8,
+        "agents": {
+          "memory_curator": 64.5,
+          "project_analyst": 104.6,
+          "knowledge_connector": 1789,
+          "research_analyst": 52.6
+        }
+      },
+      "memory": {
+        "process_rss_mb": 163.6,
+        "database_mb": 6.9
+      },
+      "idle_cpu_percent": 0.1,
+      "first_background_round_ms": 35055
+    },
+    {
+      "memories": 10000,
+      "projects": 50,
+      "connections": 22769,
+      "build_ms_per_memory": 2.2,
+      "startup": {
+        "open_database_ms": 171.8,
+        "mcp_server_ready_ms": 799.8
+      },
+      "query_ms": {
+        "hybrid_search_p50": 76.2,
+        "hybrid_search_p95": 96.8,
+        "keyword_p50": 15.3,
+        "keyword_p95": 29.3,
+        "graph_load": 214.8,
+        "pulse": 100.6,
+        "pulse_intelligence": 221.6,
+        "mind_path_p95": 14.5,
+        "mind_history": 196.5,
+        "edit_memory_p50": 0.8,
+        "edit_memory_p95": 1.4
+      },
+      "job_ms": {
+        "longest_block_during_scans": 59.8,
+        "longest_block_by_scan": {
+          "awareness_scan": 59.8,
+          "health_scan": 49.9,
+          "health_scan_after_20_edits": 0,
+          "discovery_scan": 49.6
+        },
+        "awareness_scan": 1289,
+        "health_scan": 24940.9,
+        "health_scan_after_20_edits": 951.9,
+        "discovery_scan": 11058.2,
+        "agents": {
+          "memory_curator": 896.5,
+          "project_analyst": 801.2,
+          "knowledge_connector": 11287.1,
+          "research_analyst": 473.8
+        }
+      },
+      "memory": {
+        "process_rss_mb": 363.9,
+        "database_mb": 64.4
+      },
+      "idle_cpu_percent": 0.5,
+      "first_background_round_ms": 110271
+    }
+  ]
+}

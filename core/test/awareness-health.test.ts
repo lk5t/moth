@@ -196,3 +196,24 @@ test("v0.4.0 test 17: Pause Learning / Privacy Mode stop intelligence jobs; back
   assert.ok(Number(denied) >= 1, "the denial is audited");
   b.close();
 });
+
+test("v0.4.0 M10: the possible-duplicates check is incremental — unchanged pairs are kept without re-comparing, edits are re-checked", async () => {
+  const b = openBrain();
+  const mk = (t: string, c: string) => b.store.createMemory({ title: t, content: c, category: "fact" }, user);
+  const s1 = mk("Players respawn after five seconds", "In the arena players respawn after five seconds at the nearest spawn point.");
+  const s2 = mk("Player respawn takes five seconds", "In the arena players respawn after five seconds at the nearest spawn point!");
+  for (let i = 0; i < 6; i++) mk(`Unrelated note ${i}`, `Note ${i} about ${["audio", "menus", "shops", "quests", "lighting", "maps"][i]} only.`);
+  const first: any = await b.health.scan({ as: "user", checks: ["similar_duplicate"] });
+  assert.equal(first.similar_checked, 8, "first check compares everything");
+  const pair = () => b.findings.list({ kind: "health", category: "similar_duplicate", status: "active" }).filter((f: any) => f.memory_ids.includes(s1.id) && f.memory_ids.includes(s2.id));
+  assert.equal(pair().length, 1);
+  const second: any = await b.health.scan({ as: "user", checks: ["similar_duplicate"] });
+  assert.equal(second.similar_checked, 0, "nothing changed: nothing re-compared");
+  assert.equal(pair().length, 1, "the existing finding is kept, not resolved");
+  await new Promise((r) => setTimeout(r, 15));
+  b.store.updateMemory(s2.id, { title: "Shop prices", content: "The shop sells a sword for 300 coins and a shield for 200." }, user);
+  const third: any = await b.health.scan({ as: "user", checks: ["similar_duplicate"] });
+  assert.equal(third.similar_checked, 1, "only the edited memory is compared");
+  assert.equal(pair().length, 0, "after the edit they're no longer similar, so the finding is resolved");
+  b.close();
+});

@@ -88,3 +88,21 @@ test("v0.4.0: stored research that matches an open question is suggested; feedba
   assert.ok(b.discovery.threshold("cross_project") > base, "a category the user keeps dismissing needs more confidence");
   b.close();
 });
+
+test("v0.4.0 M10: quiet mode keeps at most the configured number of discoveries per kind (most confident first)", async () => {
+  const b = openBrain();
+  b.settings.set("discovery.maxPerKind", 1);
+  const a = b.store.createProject({ name: "Alpha" }, user);
+  const c = b.store.createProject({ name: "Beta" }, user);
+  for (let i = 0; i < 3; i++) {
+    b.store.createMemory({ title: `Onboarding checklist lesson ${i}`, content: `Lesson ${i}: a short onboarding checklist with three steps increased user activation and reduced drop-off during first-run onboarding.`, category: "solution", memory_type: "lesson", project_id: a.id }, user);
+    b.store.createMemory({ title: `Onboarding drop-off ${i}`, content: `Users drop off during the first-run onboarding before activation (${i}); the onboarding checklist idea could help activation.`, category: "idea", project_id: c.id }, user);
+  }
+  const r: any = await b.discovery.scan({ as: "user" });
+  const active = b.findings.list({ kind: "discovery", status: "active", category: "cross_project" });
+  assert.ok(r.kinds.cross_project.found > 1, JSON.stringify(r.kinds));
+  assert.equal(active.length, 1, "only the most confident one is stored");
+  assert.equal(active[0].confidence, Math.max(...active.map((f: any) => f.confidence)));
+  assert.ok(r.kinds.cross_project.held_back >= 1);
+  b.close();
+});

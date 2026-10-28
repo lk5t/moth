@@ -14,6 +14,7 @@
 // No single "health score": the dashboard shows counts per check with how each check works and its limits.
 import type { Row } from "../db/database.ts";
 import { nowIso } from "../db/database.ts";
+import { documentFrequency } from "../engine/search.ts";
 import type { Brain } from "../engine/brain.ts";
 import { cosine } from "../engine/embeddings.ts";
 import { embeddingText } from "../engine/store.ts";
@@ -48,6 +49,10 @@ export interface HealthScanResult {
   skipped_projects: number;
   ms: number;
   complete: boolean;
+  /** 1 when the possible-duplicates check covered every memory it needed to (enables incremental checks). */
+  similar_complete?: number;
+  /** How many memories the possible-duplicates check compared this time (fewer when it ran incrementally). */
+  similar_checked?: number;
 }
 
 export class KnowledgeHealth {
@@ -137,9 +142,9 @@ export class KnowledgeHealth {
     const byId = new Map(mems.map((m) => [m.id, m]));
     const common = { kind: "health" as const, job_id: opts.jobId ?? null, agent: as.startsWith("agent:") ? as : null };
 
-    const run = (check: HealthCheck, inputs: Omit<FindingInput, "kind" | "category" | "algorithm">[], fully = true) => {
-      const stat = { found: inputs.length, created: 0, suppressed: 0, resolved: 0 };
-      const present = new Set<number>();
+    const run = (check: HealthCheck, inputs: Omit<FindingInput, "kind" | "category" | "algorithm">[], fully = true, alsoPresent: number[] = []) => {
+      const stat = { found: inputs.length + alsoPresent.length, created: 0, suppressed: 0, resolved: 0 };
+      const present = new Set<number>(alsoPresent);
       for (const i of inputs) {
         const r = this.brain.findings.upsert({ ...common, ...i, category: check, algorithm: `health/${check}-v1` });
         if (r.id !== null && (r.outcome === "created" || r.outcome === "updated" || r.outcome === "unchanged")) present.add(r.id);
@@ -250,13 +255,30 @@ export class KnowledgeHealth {
     // --- similar duplicates (possible). Bounded: candidates come from the full-text index, not all pairs.
     if (want.has("similar_duplicate")) {
       const vecs = this.brain.search.vectors();
+      const df = documentFrequency(mems.map((m) => `${m.title} ${m.content}`));
       const seen = new Set<string>();
       const inputs: Omit<FindingInput, "kind" | "category" | "algorithm">[] = [];
-      let n = 0;
-      for (const m of mems) {
-        if (++n % 200 === 0) {
+      // Incremental: pairs between memories that haven't changed since the last complete check were already checked,
+      // so only memories created or edited since then are compared (against everything). A full pass runs weekly.
+      const lastFull = this.db.value<string>("SELECT MAX(created_at) FROM activity_logs WHERE kind = 'health' AND action = 'scan' AND json_extract(detail, '$.similar_complete') = 1");
+      const since = !lastFull || Date.now() - Date.parse(lastFull) > 7 * 86_400_000 ? null : lastFull;
+      const changed = (m: Memory) => !since || m.updated_at > since || m.created_at > since;
+      const toCheck = since ? mems.filter(changed) : mems;
+      res.similar_checked = toCheck.length;
+      const kept: number[] = [];
+      if (since) {
+        for (const f of this.brain.findings.list({ kind: "health", category: "similar_duplicate", status: "active", limit: 5000 })) {
+          const ids = f.memory_ids as string[];
+          if (ids.every((id) => byId.has(id) && !changed(byId.get(id)!))) kept.push(Number(f.id));
+        }
+      }
+      let lastYield = Date.now();
+      for (const m of toCheck) {
+        if (Date.now() - lastYield > 30) {
+          // Keep the app responsive: hand control back at least every ~30 ms.
           stop();
           await new Promise((r) => setImmediate(r));
+          lastYield = Date.now();
           if (Date.now() - t0 > budget) {
             res.complete = false;
             break;
@@ -264,7 +286,7 @@ export class KnowledgeHealth {
         }
         const v = vecs.get(m.id);
         if (!v) continue;
-        const cands = this.brain.search.keyword(`${m.title} ${truncate(m.content, 200)}`, 12);
+        const cands = this.brain.search.candidates(`${m.title} ${truncate(m.content, 200)}`, 12, df);
         for (const [cid] of cands) {
           if (cid === m.id) continue;
           const pair = [m.id, cid].sort().join("|");
@@ -295,7 +317,8 @@ export class KnowledgeHealth {
           });
         }
       }
-      run("similar_duplicate", inputs, res.complete);
+      run("similar_duplicate", inputs, res.complete, kept);
+      if (res.complete) res.similar_complete = 1;
     }
 
     // --- possible conflicts (flags + pending conflict reviews)
@@ -500,7 +523,7 @@ export class KnowledgeHealth {
     }
 
     res.ms = Date.now() - t0;
-    this.brain.store.logActivity({ kind: "health", source: as, action: "scan", duration_ms: res.ms, detail: { checks: Object.fromEntries(Object.entries(res.checks).map(([k, v]) => [k, v.found])), repairs: res.repairs.length, complete: res.complete } });
+    this.brain.store.logActivity({ kind: "health", source: as, action: "scan", duration_ms: res.ms, detail: { checks: Object.fromEntries(Object.entries(res.checks).map(([k, v]) => [k, v.found])), repairs: res.repairs.length, complete: res.complete, similar_complete: res.similar_complete ?? 0, similar_checked: res.similar_checked ?? null } });
     return res;
   }
 

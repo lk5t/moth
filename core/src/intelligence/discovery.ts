@@ -18,6 +18,7 @@
 // Nothing is linked until the user confirms. Confirming creates a real relationship whose reason records the
 // discovery; until then, suggestions are only findings (shown as dashed edges in The Mind).
 import type { Row } from "../db/database.ts";
+import { documentFrequency } from "../engine/search.ts";
 import type { Brain } from "../engine/brain.ts";
 import { cosine } from "../engine/embeddings.ts";
 import { keywords, stem, truncate } from "../engine/text.ts";
@@ -109,21 +110,31 @@ export class Discovery {
       .filter((m) => readable(m) && !quiet.has(m.id));
     const byId = new Map(mems.map((m) => [m.id, m]));
     const vecs = b.search.vectors();
+    const df = documentFrequency(mems.map((m) => `${m.title} ${m.content}`));
     const out = new Map<DiscoveryKind, Omit<FindingInput, "kind" | "category" | "algorithm">[]>();
     const push = (k: DiscoveryKind, i: Omit<FindingInput, "kind" | "category" | "algorithm">) => (out.get(k) ?? out.set(k, []).get(k)!).push(i);
     const stats = { candidates: 0, rejected: { linked: 0, scope: 0, conflict: 0, evidence: 0, threshold: 0 } };
     const rej = stats.rejected as Record<string, number>;
     const th = { cross_project: this.threshold("cross_project"), answers_question: this.threshold("answers_question"), supporting_evidence: this.threshold("supporting_evidence") };
 
+    // Keep the app responsive: hand control back at least every ~30 ms.
+    let lastYield = Date.now();
+    const breathe = async () => {
+      stop();
+      if (Date.now() - lastYield > 30) {
+        await new Promise((r) => setImmediate(r));
+        lastYield = Date.now();
+      }
+    };
+
     // 1) cross_project: reusable memory ↔ memory in another project
-    let n = 0;
     const seen = new Set<string>();
     for (const a of mems) {
       if (!isReusable(a) || this.problematic(a)) continue;
-      if (++n % 100 === 0) (stop(), await new Promise((r) => setImmediate(r)));
+      await breathe();
       const va = vecs.get(a.id);
       if (!va) continue;
-      const cands = b.search.keyword(`${a.title} ${truncate(a.content, 300)}`, 20);
+      const cands = b.search.candidates(`${a.title} ${truncate(a.content, 300)}`, 20, df);
       for (const [cid] of cands) {
         const o = byId.get(cid);
         if (!o || o.id === a.id || this.problematic(o)) continue;
@@ -175,7 +186,7 @@ export class Discovery {
     // 2) answers_question: stored reusable knowledge ↔ open unresolved decision / blocker
     const items = b.db.all<Row>("SELECT * FROM project_items WHERE user_id = ? AND status = 'open' AND kind IN ('unresolved_decision','blocker')", [b.store.userId]);
     for (const it of items) {
-      stop();
+      await breathe();
       const p = projects.get(it.project_id as string);
       if (!p || !b.permissions.allowed(as, "read_projects", p.id)) continue;
       const text = `${it.title} ${it.detail ?? ""}`;
@@ -224,11 +235,11 @@ export class Discovery {
 
     // 3) supporting_evidence: two independent reusable memories both close to the same decision
     for (const d of mems.filter((m) => m.category === "decision" && !this.problematic(m))) {
-      stop();
+      await breathe();
       const vd = vecs.get(d.id);
       if (!vd) continue;
       const near: { m: Memory; sim: number; words: string[] }[] = [];
-      for (const [cid] of b.search.keyword(`${d.title} ${truncate(d.content, 300)}`, 20)) {
+      for (const [cid] of b.search.candidates(`${d.title} ${truncate(d.content, 300)}`, 20, df)) {
         const m = byId.get(cid);
         if (!m || m.id === d.id || !isReusable(m) || this.problematic(m)) continue;
         if (m.project_id !== d.project_id && !this.transferOk(m, d, projects)) continue;
@@ -269,18 +280,36 @@ export class Discovery {
 
     // Store (quiet: no notifications), and close discoveries that no longer hold (e.g. now connected, or a side
     // was archived) — resolved, not deleted.
+    // Quiet mode also means few: per kind only the most confident discoveries are kept (and at most a few per memory),
+    // so a large collection can't flood the list. Ones already shown stay until they no longer hold.
     const result: Row = {};
+    const maxPerKind = Math.max(1, Number(b.settings.get("discovery.maxPerKind") ?? 30));
     for (const k of Object.keys(DISCOVERY_KINDS) as DiscoveryKind[]) {
       const present = new Set<number>();
-      let created = 0, suppressed = 0;
-      for (const i of out.get(k) ?? []) {
-        const r = b.findings.upsert({ ...i, kind: "discovery", category: k, algorithm: DISCOVERY_ALGORITHM, job_id: opts.jobId ?? null, agent: as.startsWith("agent:") ? as : null });
-        if (r.id !== null && (r.outcome === "created" || r.outcome === "updated" || r.outcome === "unchanged")) present.add(r.id);
-        if (r.outcome === "created") created++;
-        if (r.outcome === "suppressed") suppressed++;
-      }
+      let created = 0, suppressed = 0, held_back = 0;
+      const all = [...(out.get(k) ?? [])].sort((x, y) => Number(y.confidence ?? 0) - Number(x.confidence ?? 0));
+      const perMemory = new Map<string, number>();
+      b.db.tx(() => {
+        for (const i of all) {
+          const busy = i.memory_ids.some((id) => (perMemory.get(id) ?? 0) >= 3);
+          if (present.size >= maxPerKind || busy) {
+            const fp = b.findings.fingerprint("discovery", k, i.key);
+            const active = b.db.value<number>("SELECT id FROM findings WHERE user_id = ? AND kind = 'discovery' AND fingerprint = ? AND status IN ('new','viewed')", [b.store.userId, fp]);
+            if (active) present.add(Number(active));
+            else held_back++;
+            continue;
+          }
+          const r = b.findings.upsert({ ...i, kind: "discovery", category: k, algorithm: DISCOVERY_ALGORITHM, job_id: opts.jobId ?? null, agent: as.startsWith("agent:") ? as : null });
+          if (r.id !== null && (r.outcome === "created" || r.outcome === "updated" || r.outcome === "unchanged")) {
+            present.add(r.id);
+            for (const id of i.memory_ids) perMemory.set(id, (perMemory.get(id) ?? 0) + 1);
+          }
+          if (r.outcome === "created") created++;
+          if (r.outcome === "suppressed") suppressed++;
+        }
+      });
       const resolved = b.findings.reconcile("discovery", [k], present, "No longer applies (connected, changed or archived)");
-      result[k] = { found: (out.get(k) ?? []).length, created, suppressed, resolved };
+      result[k] = { found: all.length, created, suppressed, held_back, resolved };
     }
     const summary = { memories: mems.length, quieted_memories: quiet.size, thresholds: th, ...stats, kinds: result, ms: Date.now() - t0 };
     b.store.logActivity({ kind: "discovery", source: as, action: "scan", duration_ms: summary.ms, detail: summary });
