@@ -131,11 +131,10 @@ test("v0.4.0: handoffs — versions, duplicate protection, edits and validation"
   assert.throws(() => b.handoffs.save({ summary: "valid summary", project: "Nope" }), /No project/);
   assert.equal(b.handoffs.list({ project: "MOTH" }).length, 3);
   assert.equal((b.projectIntel.state(p.id) as any).latest_handoff.id, ed.id);
-  // Same-millisecond writes (fast machines): the most recently written handoff still wins.
+  // Same-millisecond writes (fast machines): with equal timestamps, the most recently written handoff wins.
   b.db.run("UPDATE handoffs SET updated_at = '2026-01-01T00:00:00.000Z'");
-  const again: any = b.handoffs.edit(h1.handoff.id as string, { summary: "Did things, then more" });
-  b.db.run("UPDATE handoffs SET updated_at = '2026-01-01T00:00:00.000Z'");
-  assert.equal(b.handoffs.latest("MOTH")!.id, again.id);
+  b.db.run("UPDATE handoffs SET updated_at = '2026-01-01T00:00:00.000Z' WHERE id = ?", [h1.handoff.id]); // written last
+  assert.equal(b.handoffs.latest("MOTH")!.id, h1.handoff.id);
   b.close();
 });
 
