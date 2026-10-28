@@ -8,7 +8,7 @@ const active = (b: any, kind: string, category?: string) => b.findings.list({ ki
 test("v0.4.0 test 5: an explicit unresolved decision becomes a finding; resolving it resolves the finding; no duplicates", async () => {
   const b = openBrain();
   const p = b.store.createProject({ name: "Cursed RNG" }, user);
-  const it = b.projectIntel.addItem(p.id, { kind: "unresolved_decision", title: "Should the Auto Roll pass cost 99 or 149 Robux?" });
+  const it: any = b.projectIntel.addItem(p.id, { kind: "unresolved_decision", title: "Should the Auto Roll pass cost 99 or 149 Robux?" });
   const r1: any = await b.awareness.scan({ as: "user" });
   assert.equal(r1.projects, 1);
   const f = active(b, "awareness", "unresolved_decision");
@@ -39,7 +39,7 @@ test("v0.4.0 test 5: an explicit unresolved decision becomes a finding; resolvin
 test("v0.4.0: dismissed awareness findings don't come back unless their evidence changes", async () => {
   const b = openBrain();
   const p = b.store.createProject({ name: "Outbreak" }, user);
-  const bl = b.projectIntel.addItem(p.id, { kind: "blocker", title: "Zombies get stuck on fences" });
+  const bl: any = b.projectIntel.addItem(p.id, { kind: "blocker", title: "Zombies get stuck on fences" });
   await b.awareness.scan({ as: "user" });
   const f = active(b, "awareness", "blocker")[0];
   assert.equal(f.severity, "high");
