@@ -244,6 +244,12 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
     "health.summary": () => b().health.summary(),
     "health.repairs": (p: { limit?: number } = {}) => b().health.repairs(p?.limit ?? 50),
     "health.propose": (p: { id: number }) => b().health.propose(Number(p.id), "user"),
+    // MOTH Agents
+    "agents.overview": () => b().agents.overview(),
+    "agents.config": (p: { id: any; patch: any }) => b().agents.setConfig(req(p.id, "id"), p.patch ?? {}),
+    "agents.run": (p: { id: any; project?: string }) => ({ job_id: b().agents.run(req(p.id, "id"), { scope: "manual", project: p.project ?? null }) }),
+    "agents.jobs": (p: { id?: string; limit?: number } = {}) => b().jobs.list({ owner: p?.id ? `agent:${p.id}` : undefined, limit: p?.limit ?? 30 }).filter((j) => String(j.owner).startsWith("agent:")),
+    "agents.approvals": () => b().db.all<any>("SELECT r.id FROM review_queue r JOIN jobs j ON j.id = r.job_id WHERE r.status = 'pending' AND j.owner LIKE 'agent:%' ORDER BY r.id DESC LIMIT 200").map((r) => b().inbox.get(Number(r.id))),
     "discovery.scan": () => ({ job_id: b().jobs.enqueue("intel_discovery_scan", { as: "user" }, { dedupe: "intel_discovery_manual", priority: 3, scope: "manual", owner: "discovery", title: "Discovery scan (manual)" }) }),
     "discovery.confirm": (p: { id: number; note?: string }) => b().discovery.confirm(Number(p.id), p.note),
     "discovery.edges": () => b().discovery.suggestedEdges(),

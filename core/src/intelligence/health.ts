@@ -389,7 +389,7 @@ export class KnowledgeHealth {
           return {
             key: [r.id as string],
             title: self ? "A memory is connected to itself" : "A connection points to a memory that was merged or replaced",
-            description: self ? "This connection goes from a memory to the same memory and carries no information." : `One end of this ${String(r.type).toLowerCase().replace(/_/g, " ")} connection was ${r.s_status !== "active" ? r.s_status : r.t_status}. It can be moved to the memory that replaced it.`,
+            description: self ? "This connection goes from a memory to the same memory and carries no information." : `One end of this “${String(r.type).toLowerCase().replace(/_/g, " ")}” connection was ${r.s_status !== "active" ? r.s_status : r.t_status} into another memory. The connection can be moved to the memory that replaced it.`,
             memory_ids: [r.source_id as string, r.target_id as string],
             project_ids: [...new Set([r.s_proj, r.t_proj].filter(Boolean) as string[])],
             evidence: [{ memory_id: r.source_id as string, note: `connection ${r.id}: ${r.type}; from (${r.s_status}) to (${r.t_status})` }],

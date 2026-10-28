@@ -1,4 +1,4 @@
-import { Activity, BookOpenCheck, HeartPulse, Sparkles, Brain, Cable, ChevronRight, CircleHelp, Clock3, Copy, Cpu, FolderKanban, Inbox, LayoutDashboard, Library, Minus, Moon, PanelLeftClose, PanelLeftOpen, Search, Settings, ShieldOff, Square, UserRound, X, Zap } from "lucide-react";
+import { Activity, Bot, BookOpenCheck, HeartPulse, Sparkles, Brain, Cable, ChevronRight, CircleHelp, Clock3, Copy, Cpu, FolderKanban, Inbox, LayoutDashboard, Library, Minus, Moon, PanelLeftClose, PanelLeftOpen, Search, Settings, ShieldOff, Square, UserRound, X, Zap } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState, type ReactNode } from "react";
 import { isTauri, onConnection } from "../lib/api";
@@ -19,18 +19,19 @@ export const NAV: NavItem[] = [
   { page: "mind", label: "The Mind", icon: <Brain />, key: "2" },
   { page: "memories", label: "Memories", icon: <Library />, key: "3" },
   { page: "projects", label: "Projects", icon: <FolderKanban />, key: "4" },
-  { page: "discoveries", label: "Discoveries", icon: <Sparkles />, key: "5" },
-  { page: "health", label: "Knowledge Health", icon: <HeartPulse />, key: "6" },
-  { page: "inbox", label: "Review Queue", icon: <Inbox />, key: "7" },
-  { page: "cortex", label: "Cortex", icon: <Cpu />, key: "8" },
-  { page: "adaptation", label: "About Me", icon: <UserRound />, key: "9" },
+  { page: "agents", label: "Agents", icon: <Bot />, key: "5" },
+  { page: "discoveries", label: "Discoveries", icon: <Sparkles />, key: "6" },
+  { page: "health", label: "Knowledge Health", icon: <HeartPulse />, key: "7" },
+  { page: "inbox", label: "Review Queue", icon: <Inbox />, key: "8" },
+  { page: "cortex", label: "Cortex", icon: <Cpu />, key: "9" },
+  { page: "adaptation", label: "About Me", icon: <UserRound />, key: "" },
   { page: "research", label: "Research Library", icon: <BookOpenCheck />, key: "" },
   { page: "timeline", label: "Timeline", icon: <Clock3 />, key: "" },
 ];
 /** Sidebar groups (by page, so Ctrl+1…9 can follow NAV's order independently). */
 const GROUPS: { label: string | null; pages: Page[] }[] = [
   { label: null, pages: ["overview", "mind", "memories", "projects"] },
-  { label: "Intelligence", pages: ["discoveries", "health", "inbox", "cortex"] },
+  { label: "Intelligence", pages: ["agents", "discoveries", "health", "inbox", "cortex"] },
   { label: "Knowledge", pages: ["adaptation", "research", "timeline"] },
 ];
 const SYSTEM: NavItem[] = [

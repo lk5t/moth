@@ -20,6 +20,7 @@ import { ProjectIntel } from "../intelligence/projects.ts";
 import { Awareness, knowledgeChangeMark } from "../intelligence/awareness.ts";
 import { KnowledgeHealth } from "../intelligence/health.ts";
 import { Discovery } from "../intelligence/discovery.ts";
+import { Agents } from "../intelligence/agents.ts";
 import { Permissions } from "../intelligence/permissions.ts";
 import { LearningEngine, type LearningInput } from "./learning.ts";
 import { Metamorphosis } from "./metamorphosis.ts";
@@ -55,6 +56,7 @@ export class Brain {
   readonly awareness: Awareness;
   readonly health: KnowledgeHealth;
   readonly discovery: Discovery;
+  readonly agents: Agents;
   private awarenessMark = -1;
   readonly paths: MothPaths;
   /** Reported by the desktop shell (Windows idle time and power state); null when unknown. */
@@ -97,6 +99,8 @@ export class Brain {
     this.health = new KnowledgeHealth(this);
     this.health.registerHandlers();
     this.discovery = new Discovery(this);
+    this.agents = new Agents(this);
+    this.agents.registerHandlers();
     this.folders = new WatchedFolders(this);
     this.refreshEmbeddingProvider();
     if (this.recovered) {
@@ -269,6 +273,7 @@ export class Brain {
     const j = this.jobs;
     j.register("intel_awareness_scan", async (job, signal) => this.awareness.scan({ as: job.payload?.as ?? "background", project: job.payload?.project ?? null, signal, jobId: job.id }), { owner: "awareness", timeoutMs: 5 * 60_000 });
     j.register("intel_health_scan", async (job, signal) => this.health.scan({ as: job.payload?.as ?? "background", checks: job.payload?.checks, signal, jobId: job.id }), { owner: "health", timeoutMs: 10 * 60_000 });
+    this.agents.registerJobs();
     j.register("intel_discovery_scan", async (job, signal) => this.discovery.scan({ as: job.payload?.as ?? "background", signal, jobId: job.id }), { owner: "discovery", timeoutMs: 10 * 60_000 });
     j.heldSql = () => this.heldJobsSql();
   }
@@ -327,6 +332,7 @@ export class Brain {
           const lastDisc = this.db.value<string>("SELECT MAX(created_at) FROM activity_logs WHERE kind = 'discovery' AND action = 'scan'");
           if (!lastDisc || Date.now() - Date.parse(lastDisc) > 6 * 3_600_000) j.enqueue("intel_discovery_scan", { as: "background" }, { dedupe: "intel_discovery_scan", priority: 8, scope: "background", owner: "discovery", title: "Discovery scan" });
         }
+        this.agents.scheduleBackground();
         const lastHealth = this.db.value<string>("SELECT MAX(created_at) FROM activity_logs WHERE kind = 'health' AND action = 'scan'");
         if (!lastHealth || Date.now() - Date.parse(lastHealth) > 24 * 3_600_000) j.enqueue("intel_health_scan", { as: "background" }, { dedupe: "intel_health_scan", priority: 8, scope: "background", owner: "health", title: "Knowledge health check" });
       }

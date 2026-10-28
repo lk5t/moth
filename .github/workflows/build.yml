@@ -59,13 +59,14 @@ jobs:
         run: npm --prefix core install --no-audit --no-fund
       - name: Real inference acceptance test (llama.cpp + Qwen2.5 1.5B, no mocks)
         shell: bash
-        run: .github/ci-run.sh "Real local AI" node --experimental-transform-types --disable-warning=ExperimentalWarning --test core/test-real/cortex.real.test.ts
+        run: .github/ci-run.sh "Real local AI" node --experimental-transform-types --disable-warning=ExperimentalWarning --test --test-concurrency=1 core/test-real/cortex.real.test.ts core/test-real/intelligence.real.test.ts
       - name: Publish evidence
         if: always()
         shell: bash
         run: |
           [ -f real-ai-data/evidence.json ] && cat real-ai-data/evidence.json
           node .github/evidence.mjs real-ai-data/evidence.json
+          [ -f real-ai-data/evidence-intel.json ] && cat real-ai-data/evidence-intel.json && node .github/evidence.mjs real-ai-data/evidence-intel.json || true
 
   windows:
     name: Windows installer

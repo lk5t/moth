@@ -393,7 +393,9 @@ export class JobQueue {
             continue;
           }
           const t = nowIso();
-          if (job.attempts >= job.max_attempts || e instanceof JobCancelled) {
+          // A permission refusal won't fix itself by retrying: fail at once with the reason.
+          const permanent = (e as { code?: string })?.code === "permission_denied";
+          if (job.attempts >= job.max_attempts || e instanceof JobCancelled || permanent) {
             this.db.run("UPDATE jobs SET status = 'failed', last_error = ?, finished_at = ?, locked_by = NULL, updated_at = ? WHERE id = ?", [msg.slice(0, 2000), t, t, job.id]);
           } else {
             const backoff = Math.min(30 * 60_000, 15_000 * 2 ** (job.attempts - 1));
