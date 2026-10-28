@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 // Ordered, append-only schema migrations. Never edit an applied migration; add a new one.
 import type { Database } from "./database.ts";
 
@@ -720,12 +722,237 @@ CREATE TRIGGER trg_handoff_upd AFTER UPDATE ON handoffs BEGIN
 END;
 `,
   },
+  {
+    // v0.5.0 "Vault": a knowledge library next to memories. Documents (notes) are their own entity: a document is not
+    // a memory. Folders, collections, links (wikilinks / markdown links, resolved deterministically), attachments in
+    // MOTH-managed storage, revisions, one-time import batches with a durable per-file manifest, workspace sessions.
+    // Change-feed rows for documents are written by the library code (one per edit, one per import batch), not by
+    // row triggers, so importing 100,000 notes doesn't flood the live UI.
+    version: 6,
+    name: "vault",
+    sql: `
+CREATE TABLE folders (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  parent_id TEXT REFERENCES folders(id) ON DELETE RESTRICT,
+  name TEXT NOT NULL,
+  import_batch_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX idx_folders_name ON folders(user_id, COALESCE(parent_id, ''), name COLLATE NOCASE);
+CREATE INDEX idx_folders_parent ON folders(parent_id);
+
+CREATE TABLE documents (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  folder_id TEXT REFERENCES folders(id) ON DELETE RESTRICT,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'note' CHECK (source IN ('note','obsidian')),
+  source_path TEXT,
+  import_batch_id TEXT,
+  content_hash TEXT NOT NULL,
+  imported_hash TEXT,
+  frontmatter TEXT NOT NULL DEFAULT '{}',
+  aliases TEXT NOT NULL DEFAULT '[]',
+  tags TEXT NOT NULL DEFAULT '[]',
+  project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','archived')),
+  version INTEGER NOT NULL DEFAULT 1,
+  words INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_docs_folder ON documents(user_id, folder_id, status);
+CREATE INDEX idx_docs_title ON documents(user_id, title COLLATE NOCASE);
+CREATE INDEX idx_docs_batch ON documents(import_batch_id);
+CREATE INDEX idx_docs_hash ON documents(user_id, content_hash);
+CREATE INDEX idx_docs_updated ON documents(user_id, status, updated_at DESC);
+
+CREATE TABLE document_tags (
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  tag TEXT NOT NULL COLLATE NOCASE,
+  PRIMARY KEY (document_id, tag)
+);
+CREATE INDEX idx_doctags_tag ON document_tags(tag);
+
+CREATE TABLE document_aliases (
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  alias TEXT NOT NULL COLLATE NOCASE,
+  PRIMARY KEY (document_id, alias)
+);
+CREATE INDEX idx_docaliases_alias ON document_aliases(alias);
+
+CREATE VIRTUAL TABLE documents_fts USING fts5(
+  title, content, tags,
+  content='documents', content_rowid='rowid',
+  tokenize='porter unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER trg_docs_fts_ins AFTER INSERT ON documents BEGIN
+  INSERT INTO documents_fts(rowid, title, content, tags) VALUES (NEW.rowid, NEW.title, NEW.content, NEW.tags);
+END;
+CREATE TRIGGER trg_docs_fts_del AFTER DELETE ON documents BEGIN
+  INSERT INTO documents_fts(documents_fts, rowid, title, content, tags) VALUES ('delete', OLD.rowid, OLD.title, OLD.content, OLD.tags);
+END;
+CREATE TRIGGER trg_docs_fts_upd AFTER UPDATE OF title, content, tags ON documents BEGIN
+  INSERT INTO documents_fts(documents_fts, rowid, title, content, tags) VALUES ('delete', OLD.rowid, OLD.title, OLD.content, OLD.tags);
+  INSERT INTO documents_fts(rowid, title, content, tags) VALUES (NEW.rowid, NEW.title, NEW.content, NEW.tags);
+END;
+
+CREATE TABLE document_revisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  created_by TEXT NOT NULL DEFAULT 'user',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_docrev_doc ON document_revisions(document_id, id DESC);
+
+-- Links found in a document's text (and manual links). Resolution is deterministic; ambiguous and unresolved
+-- references are kept with their candidates, never guessed.
+CREATE TABLE document_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('wikilink','embed','markdown','manual')),
+  raw TEXT NOT NULL,
+  target_text TEXT NOT NULL,
+  alias TEXT,
+  heading TEXT,
+  target_kind TEXT CHECK (target_kind IN ('document','memory','attachment','url')),
+  target_id TEXT,
+  status TEXT NOT NULL CHECK (status IN ('resolved','unresolved','ambiguous','external','unsafe')),
+  candidates TEXT NOT NULL DEFAULT '[]',
+  position INTEGER NOT NULL DEFAULT 0,
+  created_by TEXT NOT NULL DEFAULT 'parser',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_doclinks_source ON document_links(source_id);
+CREATE INDEX idx_doclinks_target ON document_links(target_kind, target_id);
+CREATE INDEX idx_doclinks_text ON document_links(status, target_text COLLATE NOCASE);
+
+CREATE TABLE collections (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX idx_collections_name ON collections(user_id, name COLLATE NOCASE);
+CREATE TABLE collection_items (
+  collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+  entity_kind TEXT NOT NULL CHECK (entity_kind IN ('document','memory','project')),
+  entity_id TEXT NOT NULL,
+  added_at TEXT NOT NULL,
+  PRIMARY KEY (collection_id, entity_kind, entity_id)
+);
+
+-- Files are stored once per content (sha256) in MOTH's own attachments folder.
+CREATE TABLE attachments (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  original_name TEXT NOT NULL,
+  storage_path TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  media_type TEXT NOT NULL,
+  import_batch_id TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX idx_attach_hash ON attachments(user_id, sha256);
+CREATE INDEX idx_attach_name ON attachments(user_id, original_name COLLATE NOCASE);
+CREATE TABLE attachment_refs (
+  attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  PRIMARY KEY (attachment_id, document_id)
+);
+CREATE INDEX idx_attachrefs_doc ON attachment_refs(document_id);
+
+CREATE TABLE import_batches (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'obsidian',
+  source_root TEXT NOT NULL,
+  root_folder_id TEXT,
+  status TEXT NOT NULL CHECK (status IN ('scanning','scanned','importing','paused','cancelled','failed','done','undone')),
+  options TEXT NOT NULL DEFAULT '{}',
+  scan TEXT NOT NULL DEFAULT '{}',
+  progress TEXT NOT NULL DEFAULT '{}',
+  result TEXT NOT NULL DEFAULT '{}',
+  error TEXT,
+  job_id INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT
+);
+-- Durable per-file manifest: what was found, what happened to it. Enables resume, idempotency and undo.
+CREATE TABLE import_items (
+  batch_id TEXT NOT NULL REFERENCES import_batches(id) ON DELETE CASCADE,
+  rel_path TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('note','attachment','unsupported','folder')),
+  size INTEGER NOT NULL DEFAULT 0,
+  mtime_ms INTEGER NOT NULL DEFAULT 0,
+  sha256 TEXT,
+  links INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','skipped','duplicate','failed','excluded')),
+  entity_id TEXT,
+  detail TEXT,
+  PRIMARY KEY (batch_id, rel_path)
+);
+CREATE INDEX idx_importitems_status ON import_items(batch_id, kind, status);
+CREATE TABLE import_link_targets (
+  batch_id TEXT NOT NULL REFERENCES import_batches(id) ON DELETE CASCADE,
+  rel_path TEXT NOT NULL,
+  target TEXT NOT NULL
+);
+CREATE INDEX idx_importlinks ON import_link_targets(batch_id, target COLLATE NOCASE);
+CREATE TRIGGER trg_import_batch_ins AFTER INSERT ON import_batches BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('import', NEW.id, 'insert');
+END;
+CREATE TRIGGER trg_import_batch_upd AFTER UPDATE OF status, progress, result ON import_batches BEGIN
+  INSERT INTO db_changes(entity, entity_id, op) VALUES ('import', NEW.id, 'update');
+END;
+
+CREATE TABLE document_positions (
+  document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+  x REAL NOT NULL,
+  y REAL NOT NULL,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE workspace_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  state TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`,
+  },
 ];
 
 export function runMigrations(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
   const applied = new Set(db.all<{ version: number }>("SELECT version FROM schema_migrations").map((r) => Number(r.version)));
+  // An existing database about to be upgraded is copied first (a consistent snapshot via VACUUM INTO), so an
+  // upgrade can always be undone by hand. Installer rollbacks don't undo migrations; this copy does.
+  const pending = MIGRATIONS.filter((m) => !applied.has(m.version));
+  if (pending.length && applied.size && db.file !== ":memory:") {
+    try {
+      const dir = path.join(path.dirname(db.file), "backups");
+      fs.mkdirSync(dir, { recursive: true });
+      const target = path.join(dir, `before-schema-v${pending[pending.length - 1].version}-${new Date().toISOString().replace(/[:.]/g, "-")}.db`);
+      db.raw.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+    } catch {
+      /* best effort: e.g. another process holds the database; the migration itself is still transactional */
+    }
+  }
   for (const m of MIGRATIONS) {
     if (applied.has(m.version)) continue;
     db.tx(() => {

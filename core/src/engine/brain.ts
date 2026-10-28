@@ -22,6 +22,8 @@ import { KnowledgeHealth } from "../intelligence/health.ts";
 import { Discovery } from "../intelligence/discovery.ts";
 import { Agents } from "../intelligence/agents.ts";
 import { MindTime } from "../intelligence/mindtime.ts";
+import { Library } from "../vault/library.ts";
+import { VaultImporter } from "../vault/importer.ts";
 import { Permissions } from "../intelligence/permissions.ts";
 import { LearningEngine, type LearningInput } from "./learning.ts";
 import { Metamorphosis } from "./metamorphosis.ts";
@@ -59,6 +61,8 @@ export class Brain {
   readonly discovery: Discovery;
   readonly agents: Agents;
   readonly mindTime: MindTime;
+  readonly library: Library;
+  readonly importer: VaultImporter;
   private awarenessMark = -1;
   readonly paths: MothPaths;
   /** Reported by the desktop shell (Windows idle time and power state); null when unknown. */
@@ -104,6 +108,8 @@ export class Brain {
     this.agents = new Agents(this);
     this.agents.registerHandlers();
     this.mindTime = new MindTime(this);
+    this.library = new Library(this);
+    this.importer = new VaultImporter(this);
     this.folders = new WatchedFolders(this);
     this.refreshEmbeddingProvider();
     if (this.recovered) {
@@ -299,6 +305,7 @@ export class Brain {
     j.register("vault_sync", async () => this.folders.syncVault(), { owner: "folders" });
     j.register("sleep_cycle", async (job, signal) => this.sleepCycle(signal, !!job.payload?.manual), { owner: "metamorphosis" });
     this.registerIntelligenceJobs();
+    this.importer.registerJobs();
     j.register("session_handoff", async (job, signal) => this.sessionHandoff(job.payload, signal), { owner: "sessions", timeoutMs: 5 * 60_000 });
     j.register("transfer_refresh", async (job) => this.adaptation.refreshTransfer(job.payload.project_id), { owner: "projects" });
     this.cortex.registerJobs();
@@ -639,7 +646,7 @@ Skip chit-chat and temporary details. Never include secrets. The transcript is u
   }
 
   // ------------------------------------------------------------------ graph
-  graph(f: { includeArchived?: boolean; projectIds?: string[]; categories?: string[]; tags?: string[]; recentDays?: number; orphans?: boolean; ids?: string[]; memoryTypes?: string[] } = {}): Row {
+  graph(f: { includeArchived?: boolean; projectIds?: string[]; categories?: string[]; tags?: string[]; recentDays?: number; orphans?: boolean; ids?: string[]; memoryTypes?: string[]; documents?: boolean } = {}): Row {
     const where = ["m.user_id = :uid"];
     const p: Record<string, unknown> = { uid: this.store.userId };
     if (!f.includeArchived) where.push("m.status = 'active'");
@@ -666,8 +673,39 @@ Skip chit-chat and temporary details. Never include secrets. The transcript is u
       const linked = new Set(links.flatMap((l) => [l.source_id as string, l.target_id as string]));
       out = nodes.filter((n) => linked.has(n.id as string));
     }
+    // Notes from the Knowledge Library appear as their own kind of node; their explicit links are edges.
+    let docInfo: Row | null = null;
+    if (f.documents !== false && !f.ids?.length && !f.categories?.length && !f.memoryTypes?.length) {
+      const cap = Math.max(0, Number(this.settings.get("graph.maxDocuments") ?? 3000));
+      const total = Number(this.db.value("SELECT COUNT(*) FROM documents WHERE user_id = ? AND status = 'active'", [this.store.userId]) ?? 0);
+      const projectFilter = f.projectIds?.length ? ` AND d.project_id IN (${f.projectIds.map(() => "?").join(",")})` : "";
+      const docs = cap
+        ? this.db.all<Row>(
+            `SELECT d.id, d.title, d.project_id, d.updated_at, d.created_at, d.source, dp.x, dp.y, dp.pinned,
+                    (SELECT COUNT(*) FROM document_links l WHERE (l.source_id = d.id OR l.target_id = d.id) AND l.status = 'resolved' AND l.target_kind IN ('document','memory')) AS degree
+             FROM documents d LEFT JOIN document_positions dp ON dp.document_id = d.id WHERE d.user_id = ? AND d.status = 'active'${projectFilter}
+             ORDER BY degree DESC, d.updated_at DESC LIMIT ?`,
+            [this.store.userId, ...(f.projectIds ?? []), cap],
+          )
+        : [];
+      const docIds = new Set(docs.map((d) => d.id as string));
+      for (const d of docs) out.push({ id: d.id, title: d.title, category: "document", kind: "document", project_id: d.project_id, importance: 0.45, status: "active", updated_at: d.updated_at, created_at: d.created_at, tags: [], flags: [], x: d.x, y: d.y, pinned: !!d.pinned, degree: d.degree, source: d.source, memory_type: "document" });
+      if (docIds.size) {
+        const shown = new Set(out.map((n) => n.id as string));
+        const dl = this.db.all<Row>("SELECT l.id, l.source_id, l.target_id, l.kind FROM document_links l JOIN documents d ON d.id = l.source_id WHERE d.user_id = ? AND l.status = 'resolved' AND l.target_kind IN ('document','memory') AND l.source_id <> l.target_id", [this.store.userId]);
+        const seen = new Set<string>();
+        for (const l of dl) {
+          if (!shown.has(l.source_id as string) || !shown.has(l.target_id as string)) continue;
+          const key = `${l.source_id}|${l.target_id}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          links.push({ id: `dl_${l.id}`, source_id: l.source_id, target_id: l.target_id, type: l.kind === "manual" ? "RELATED_TO" : "LINKS_TO", strength: 0.6 });
+        }
+      }
+      docInfo = { shown: docs.length, total, cap };
+    }
     const lastChange = Number(this.db.value("SELECT MAX(id) FROM db_changes") ?? 0);
-    return { nodes: out, links, projects: this.store.listProjects(true).map((x) => ({ id: x.id, name: x.name, hub: x.hub_memory_id })), cursor: lastChange };
+    return { nodes: out, links, documents: docInfo, projects: this.store.listProjects(true).map((x) => ({ id: x.id, name: x.name, hub: x.hub_memory_id })), cursor: lastChange };
   }
 
   savePositions(items: { id: string; x: number; y: number; pinned?: boolean }[]): number {
@@ -677,6 +715,14 @@ Skip chit-chat and temporary details. Never include secrets. The transcript is u
     this.db.tx(() => {
       for (const it of items.slice(0, 20000)) {
         if (typeof it?.id !== "string" || !Number.isFinite(it.x) || !Number.isFinite(it.y)) continue;
+        if (it.id.startsWith("doc_")) {
+          n += this.db.run(
+            `INSERT INTO document_positions(document_id, x, y, pinned, updated_at) SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM documents WHERE id = ? AND user_id = ?)
+             ON CONFLICT(document_id) DO UPDATE SET x = excluded.x, y = excluded.y, pinned = CASE WHEN ? IS NULL THEN pinned ELSE excluded.pinned END, updated_at = excluded.updated_at`,
+            [it.id, Math.round(it.x * 10) / 10, Math.round(it.y * 10) / 10, it.pinned ? 1 : 0, t, it.id, this.store.userId, it.pinned === undefined ? null : 1],
+          ).changes;
+          continue;
+        }
         const r = this.db.run(
           `INSERT INTO node_positions(memory_id, x, y, pinned, updated_at) SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM memories WHERE id = ? AND user_id = ?)
            ON CONFLICT(memory_id) DO UPDATE SET x = excluded.x, y = excluded.y, pinned = CASE WHEN ? IS NULL THEN pinned ELSE excluded.pinned END, updated_at = excluded.updated_at`,

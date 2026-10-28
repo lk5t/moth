@@ -76,6 +76,30 @@ export async function startApi(c: Controller, opts: { port?: number; token?: str
       return;
     }
 
+    // Library attachments (images in notes, PDFs…), only from MOTH's own attachments folder, never executed.
+    const att = url.pathname.match(/^\/api\/attachments\/(att_[A-Za-z0-9]+)$/);
+    if (att && req.method === "GET") {
+      if (!tokenOk(url.searchParams.get("token"))) return void res.writeHead(401).end();
+      try {
+        const { file, row } = c.brain().library.attachmentFile(att[1]);
+        const st = fs.statSync(file);
+        const type = String(row.media_type || "application/octet-stream");
+        const inline = /^(image\/(png|jpeg|gif|webp|bmp|avif)|application\/pdf|audio\/|video\/|text\/plain)/.test(type);
+        res.writeHead(200, {
+          "content-type": type === "image/svg+xml" ? "image/svg+xml" : type,
+          "content-length": st.size,
+          "x-content-type-options": "nosniff",
+          "content-security-policy": "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox",
+          "content-disposition": `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(String(row.original_name))}`,
+          "cache-control": "private, max-age=86400",
+        });
+        fs.createReadStream(file).pipe(res);
+      } catch {
+        res.writeHead(404).end();
+      }
+      return;
+    }
+
     if (opts.staticDir && req.method === "GET") return void serveStatic(opts.staticDir, url.pathname, res);
     res.writeHead(404).end();
   });

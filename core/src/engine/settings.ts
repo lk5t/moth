@@ -89,6 +89,10 @@ export const DEFAULT_SETTINGS = {
   // v0.4.0 Discovery (quiet mode): only suggestions at least this confident are shown.
   "discovery.minConfidence": 0.6,
   "discovery.maxPerKind": 30,
+  "graph.maxDocuments": 3000,
+  "updates.autoCheck": true,
+  "updates.lastCheck": "",
+  "updates.deferredVersion": "",
   // v0.4.0 Agents: per-agent { enabled, background, everyHours, maxItems } overrides (defaults in agents.ts).
   "agents.config": {} as Record<string, { enabled?: boolean; background?: boolean; everyHours?: number; maxItems?: number }>,
   "appearance.sidebarCollapsed": false,
