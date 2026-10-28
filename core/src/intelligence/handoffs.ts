@@ -146,8 +146,8 @@ export class Handoffs {
     const p = project ? this.store.getProject(project) : null;
     if (project && !p) throw new MothError("not_found", `No project "${project}"`);
     const r = p
-      ? this.db.get<Row>("SELECT * FROM handoffs WHERE user_id = ? AND project_id = ? ORDER BY updated_at DESC LIMIT 1", [this.store.userId, p.id])
-      : this.db.get<Row>("SELECT * FROM handoffs WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1", [this.store.userId]);
+      ? this.db.get<Row>("SELECT * FROM handoffs WHERE user_id = ? AND project_id = ? ORDER BY updated_at DESC, (SELECT MAX(c.id) FROM db_changes c WHERE c.entity = 'handoff' AND c.entity_id = handoffs.id) DESC LIMIT 1", [this.store.userId, p.id])
+      : this.db.get<Row>("SELECT * FROM handoffs WHERE user_id = ? ORDER BY updated_at DESC, (SELECT MAX(c.id) FROM db_changes c WHERE c.entity = 'handoff' AND c.entity_id = handoffs.id) DESC LIMIT 1", [this.store.userId]);
     return r ? this.expand(r) : null;
   }
 
@@ -155,8 +155,8 @@ export class Handoffs {
     const p = f.project ? this.store.getProject(f.project) : null;
     if (f.project && !p) throw new MothError("not_found", `No project "${f.project}"`);
     const rows = p
-      ? this.db.all<Row>("SELECT * FROM handoffs WHERE user_id = ? AND project_id = ? ORDER BY updated_at DESC LIMIT ?", [this.store.userId, p.id, Math.min(200, f.limit ?? 20)])
-      : this.db.all<Row>("SELECT * FROM handoffs WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?", [this.store.userId, Math.min(200, f.limit ?? 20)]);
+      ? this.db.all<Row>("SELECT * FROM handoffs WHERE user_id = ? AND project_id = ? ORDER BY updated_at DESC, (SELECT MAX(c.id) FROM db_changes c WHERE c.entity = 'handoff' AND c.entity_id = handoffs.id) DESC LIMIT ?", [this.store.userId, p.id, Math.min(200, f.limit ?? 20)])
+      : this.db.all<Row>("SELECT * FROM handoffs WHERE user_id = ? ORDER BY updated_at DESC, (SELECT MAX(c.id) FROM db_changes c WHERE c.entity = 'handoff' AND c.entity_id = handoffs.id) DESC LIMIT ?", [this.store.userId, Math.min(200, f.limit ?? 20)]);
     return rows.filter((r) => !f.projectIds || !r.project_id || f.projectIds.has(r.project_id as string)).map((r) => this.expand(r));
   }
 
