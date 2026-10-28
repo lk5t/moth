@@ -1,0 +1,22 @@
+name: One-time updater key generation
+on:
+  push:
+    branches: [keygen]
+jobs:
+  keygen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Generate the updater signing key with the official Tauri CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx -y @tauri-apps/cli@2 signer generate --ci -p "" -w "$RUNNER_TEMP/moth.key" > /dev/null
+          echo "::notice title=MOTH updater public key::$(cat "$RUNNER_TEMP/moth.key.pub")"
+          # The private key leaves this machine only encrypted to a one-time transport certificate.
+          enc=$(openssl cms -encrypt -binary -aes256 -in "$RUNNER_TEMP/moth.key" -outform DER .github/keygen-transport.crt | base64 -w0)
+          echo "::notice title=MOTH updater private key (encrypted)::$enc"
+          rm -f "$RUNNER_TEMP/moth.key"
