@@ -146,6 +146,12 @@ interface Props {
   settings: GraphSettings;
   selectedId?: string | null;
   highlight?: Set<string> | null;
+  /** Ids of stored relationships to light up (a path between two memories). */
+  edgeHighlight?: Set<string> | null;
+  /** Suggested (not yet real) connections: drawn dashed, never part of the layout. */
+  suggested?: { id: string; source_id: string; target_id: string }[];
+  /** Memories with active awareness items: a soft amber ring (only shown when the caller passes them). */
+  attention?: Set<string> | null;
   bloom?: Map<string, number>;
   projectColors?: Map<string, string>;
   compact?: boolean;
@@ -449,6 +455,36 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
       ctx.lineTo(ex, ey);
       ctx.stroke();
     }
+    // ---- a path of real stored relationships, bright lavender
+    if (p.edgeHighlight?.size) {
+      ctx.strokeStyle = "rgba(196,181,253,0.95)";
+      ctx.lineWidth = lw * 2.4;
+      ctx.beginPath();
+      for (const l of linksRef.current) {
+        if (!p.edgeHighlight.has(l.id)) continue;
+        const a = l.source as SimNode;
+        const b = l.target as SimNode;
+        ctx.moveTo(a.x!, a.y!);
+        ctx.lineTo(b.x!, b.y!);
+      }
+      ctx.stroke();
+    }
+    // ---- suggestions: dashed, faint lavender, clearly not (yet) connections
+    if (p.suggested?.length) {
+      ctx.strokeStyle = "rgba(167,139,250,0.55)";
+      ctx.lineWidth = lw * 1.3;
+      ctx.setLineDash([5 / t.k, 5 / t.k]);
+      ctx.beginPath();
+      for (const sg of p.suggested) {
+        const a = byId.current.get(sg.source_id);
+        const b = byId.current.get(sg.target_id);
+        if (!a || !b) continue;
+        ctx.moveTo(a.x!, a.y!);
+        ctx.lineTo(b.x!, b.y!);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
     if (s.showArrows && t.k > 0.9) {
       ctx.fillStyle = `rgba(190,190,205,${0.3 * (1 - 0.7 * dimMix)})`;
       for (const l of linksRef.current) {
@@ -566,6 +602,14 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
         ctx.lineWidth = 1.3 / t.k;
         ctx.beginPath();
         ctx.arc(n.x!, n.y!, n.r * scale + 3.2 / t.k, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      if (p.attention?.has(n.id)) {
+        ctx.globalAlpha = 0.75 * (1 - 0.7 * n.dim);
+        ctx.strokeStyle = "#E8C37A";
+        ctx.lineWidth = 1.2 / t.k;
+        ctx.beginPath();
+        ctx.arc(n.x!, n.y!, n.r * scale + 5 / t.k, 0, Math.PI * 2);
         ctx.stroke();
       }
       if (n.flags?.includes("possible_conflict") && n.dim < 0.5) {
@@ -1104,7 +1148,7 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
   useEffect(() => {
     const c = canvas.current!;
     // Diagnostics hook (used by the performance tests): real counters from this renderer.
-    if (!live.current.compact) (window as any).__mothGraphStats = () => ({ nodes: nodesRef.current.length, links: linksRef.current.length, frames: counters.current.frames, breathFrames: counters.current.breathFrames, lastFrameMs: counters.current.lastFrameMs, simAlpha: sim.current?.alpha() ?? 0, bgFrames: atmos.current?.frames ?? 0, clusters: [...clusters.current.values()].filter((c) => c.a > 0.5).map((c) => ({ id: c.id, name: c.name })), labels: clusterLabels.current.map((l) => ({ ...l })), transform: { ...transform.current } });
+    if (!live.current.compact) (window as any).__mothGraphStats = () => ({ nodes: nodesRef.current.length, links: linksRef.current.length, frames: counters.current.frames, breathFrames: counters.current.breathFrames, lastFrameMs: counters.current.lastFrameMs, simAlpha: sim.current?.alpha() ?? 0, bgFrames: atmos.current?.frames ?? 0, clusters: [...clusters.current.values()].filter((c) => c.a > 0.5).map((c) => ({ id: c.id, name: c.name })), labels: clusterLabels.current.map((l) => ({ ...l })), transform: { ...transform.current }, screen: Object.fromEntries(nodesRef.current.map((n) => { const r = canvas.current!.getBoundingClientRect(); return [n.title, [r.left + transform.current.x + n.x! * transform.current.k, r.top + transform.current.y + n.y! * transform.current.k]]; })) });
     if (wrap.current && moteCanvas.current) atmos.current = new Atmosphere(wrap.current, moteCanvas.current);
     const resize = () => {
       if (!wrap.current) return;
@@ -1465,7 +1509,7 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.bloom]);
 
-  useEffect(requestDraw, [props.selectedId, props.highlight, props.motion, props.clusters, props.settings.showLabels, props.settings.textFadeThreshold, props.settings.linkThickness, props.settings.showArrows]);
+  useEffect(requestDraw, [props.selectedId, props.highlight, props.edgeHighlight, props.suggested, props.attention, props.motion, props.clusters, props.settings.showLabels, props.settings.textFadeThreshold, props.settings.linkThickness, props.settings.showArrows]);
 
   return (
     <div ref={wrap} className="absolute inset-0 overflow-hidden" style={{ background: BG }}>

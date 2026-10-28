@@ -21,6 +21,7 @@ import { Awareness, knowledgeChangeMark } from "../intelligence/awareness.ts";
 import { KnowledgeHealth } from "../intelligence/health.ts";
 import { Discovery } from "../intelligence/discovery.ts";
 import { Agents } from "../intelligence/agents.ts";
+import { MindTime } from "../intelligence/mindtime.ts";
 import { Permissions } from "../intelligence/permissions.ts";
 import { LearningEngine, type LearningInput } from "./learning.ts";
 import { Metamorphosis } from "./metamorphosis.ts";
@@ -57,6 +58,7 @@ export class Brain {
   readonly health: KnowledgeHealth;
   readonly discovery: Discovery;
   readonly agents: Agents;
+  readonly mindTime: MindTime;
   private awarenessMark = -1;
   readonly paths: MothPaths;
   /** Reported by the desktop shell (Windows idle time and power state); null when unknown. */
@@ -101,6 +103,7 @@ export class Brain {
     this.discovery = new Discovery(this);
     this.agents = new Agents(this);
     this.agents.registerHandlers();
+    this.mindTime = new MindTime(this);
     this.folders = new WatchedFolders(this);
     this.refreshEmbeddingProvider();
     if (this.recovered) {

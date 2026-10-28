@@ -1,11 +1,13 @@
-import { Archive, Crosshair, Eye, Focus, Maximize2, Minus, Pencil, Pin, Plus, Search, SlidersHorizontal, Share2, X } from "lucide-react";
+import { Archive, CircleAlert, Crosshair, Eye, Focus, History, Maximize2, Minus, Pencil, Pin, Plus, Route, Search, SlidersHorizontal, Share2, Sparkles, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button, ContextMenu, Input, Select, Slider, Switch, Tabs } from "../components/ui";
 import { GraphCanvas, type GraphHandle, type GraphNodeData, type GraphSettings, type SmoothnessResult } from "../graph/GraphCanvas";
 import { onChanges, rpc } from "../lib/api";
 import { useApp } from "../lib/app";
+import { useLive } from "../lib/hooks";
 import { useAmbient, useMotion } from "../lib/motion";
+import { HistoryBar, PathPanel, SuggestionsPanel, type PathState } from "./MindLenses";
 import { CATEGORY_COLOR, CATEGORY_LABEL, MEMORY_TYPE_LABEL, RELATION_LABEL, SOURCE_LABEL, cn, debounce } from "../lib/utils";
 
 export type FullGraphSettings = GraphSettings & { showOrphans: boolean; showArchived: boolean; recentDays: number; categories: string[]; projects: string[]; tags: string[]; localDepth: number };
@@ -44,6 +46,31 @@ export function MindPage() {
   const motion = useMotion();
   const ambient = useAmbient();
   const graph = useRef<GraphHandle>(null);
+  // The Mind 3.0 lenses
+  const [lens, setLens] = useState<"none" | "path" | "history">("none");
+  const [path, setPath] = useState<PathState>({});
+  const [past, setPast] = useState<any | null>(null);
+  const [showSuggest, setShowSuggest] = useState(false);
+  const [showAttention, setShowAttention] = useState(false);
+  const { data: suggestedRaw } = useLive<any[]>("discovery.edges", {}, { entities: ["finding", "relationship"], enabled: showSuggest });
+  const { data: attentionRaw } = useLive<any[]>("graph.attention", {}, { entities: ["finding"], enabled: showAttention });
+  const suggested = useMemo(() => (showSuggest && !past ? suggestedRaw ?? [] : undefined), [showSuggest, suggestedRaw, past]);
+  const attention = useMemo(() => (showAttention && attentionRaw ? new Set(attentionRaw.map((a) => a.memory_id as string)) : null), [showAttention, attentionRaw]);
+  const pathEdges = useMemo(() => (path.result?.found ? new Set<string>(path.result.edge_ids) : null), [path.result]);
+  const pathNodes = useMemo(() => (path.result?.found ? new Set<string>(path.result.node_ids) : null), [path.result]);
+  const pickForPath = (id: string) => {
+    const title = (past ?? data)?.nodes.find((n: GraphNodeData) => n.id === id)?.title ?? "memory";
+    if (!path.from || path.to) return setPath({ from: { id, title } });
+    if (id === path.from.id) return;
+    const next: PathState = { ...path, to: { id, title }, loading: true };
+    setPath(next);
+    rpc<any>("graph.path", { from: path.from.id, to: id })
+      .then((result) => {
+        setPath({ ...next, loading: false, result });
+        if (result.found) graph.current?.fitIds(result.node_ids);
+      })
+      .catch((e) => setPath({ ...next, loading: false, error: (e as Error).message }));
+  };
   useEffect(() => {
     if (params.project) {
       setScope(params.project);
@@ -129,28 +156,32 @@ export function MindPage() {
   const savePositions = useMemo(() => debounce((items: any[]) => void rpc("graph.positions", { items }), 800), []);
   const onPositions = (items: { id: string; x: number; y: number; pinned?: boolean }[]) => {
     if (items.length === 1 && items[0].pinned !== undefined) void rpc("graph.positions", { items });
-    else if (mode === "global") savePositions(items);
+    else if (mode === "global" && !past) savePositions(items);
   };
 
   if (!settings) return <div className="h-full bg-graph" />;
-  const node = (id: string) => data?.nodes.find((n) => n.id === id);
-  const counts = data ? `${data.nodes.length.toLocaleString()} memories, ${data.links.length.toLocaleString()} connections` : "";
+  const shown = past ?? data;
+  const node = (id: string) => shown?.nodes.find((n: GraphNodeData) => n.id === id);
+  const counts = shown ? `${shown.nodes.length.toLocaleString()} memories, ${shown.links.length.toLocaleString()} connections` : "";
 
   return (
     <div className="relative h-full overflow-hidden bg-graph">
-      {data ? (
+      {shown ? (
         <GraphCanvas
           ref={graph}
-          nodes={data.nodes}
-          links={data.links}
+          nodes={shown.nodes}
+          links={shown.links}
           settings={settings}
-          selectedId={selected}
-          highlight={highlight}
+          selectedId={lens === "path" ? path.from?.id ?? null : selected}
+          highlight={pathNodes ?? highlight}
+          edgeHighlight={pathEdges}
+          suggested={suggested}
+          attention={attention}
           projectColors={projectColors}
           motion={motion}
           ambient={ambient}
           clusters={mode === "global" ? clusterNames : undefined}
-          onSelect={(id) => select(id)}
+          onSelect={(id) => (lens === "path" ? id && pickForPath(id) : select(id))}
           onFocus={(id) => {
             graph.current?.focus(id, 2);
             select(id);
@@ -233,10 +264,30 @@ export function MindPage() {
             <SlidersHorizontal />
           </ToolBtn>
         </div>
+        <div className="flex gap-1 rounded-[var(--radius-md)] border border-line bg-[#161616]/90 p-0.5">
+          <ToolBtn label="Path between two memories" active={lens === "path"} onClick={() => (setLens(lens === "path" ? "none" : "path"), setPath({}))}>
+            <Route />
+          </ToolBtn>
+          <ToolBtn label="History: how your knowledge grew" active={lens === "history"} onClick={() => setLens(lens === "history" ? "none" : "history")}>
+            <History />
+          </ToolBtn>
+          <ToolBtn label="Show suggested connections" active={showSuggest} onClick={() => setShowSuggest(!showSuggest)}>
+            <Sparkles />
+          </ToolBtn>
+          <ToolBtn label="Show what needs attention" active={showAttention} onClick={() => setShowAttention(!showAttention)}>
+            <CircleAlert />
+          </ToolBtn>
+        </div>
+        {showSuggest ? <SuggestionsPanel edges={suggestedRaw ?? []} titleOf={(id) => node(id)?.title} onClose={() => setShowSuggest(false)} /> : null}
+        {showAttention ? (
+          <div className="w-[300px] rounded-[12px] border border-line bg-[#161616]/95 p-3 text-[11.5px] text-ink-2" data-testid="attention-note">
+            <span className="mr-1 inline-block size-2 rounded-full border border-[#E8C37A]" /> Amber rings: {attentionRaw?.length ?? 0} memor{attentionRaw?.length === 1 ? "y has" : "ies have"} open awareness items (unresolved decisions, blockers, unfinished work…). Details are on the Overview.
+          </div>
+        ) : null}
         <AnimatePresence>{panel ? <SettingsPanel s={settings} update={update} projects={data?.projects ?? []} tags={allTags} onClose={() => setPanel(false)} onMeasure={() => graph.current!.measure()} /> : null}</AnimatePresence>
       </div>
 
-      <div className="pointer-events-none absolute bottom-4 left-4 max-w-[360px] text-[12px] text-ink-3">
+      <div className={cn("pointer-events-none absolute bottom-4 left-4 max-w-[360px] text-[12px] text-ink-3", lens === "path" && "hidden")}>
         {hover ? (
           <div className="rounded-[12px] border border-line bg-[#161616]/95 px-3.5 py-2.5 shadow-[0_12px_40px_rgba(0,0,0,0.45)] backdrop-blur">
             <div className="text-[13px] text-ink">{hover.title}</div>
@@ -251,7 +302,16 @@ export function MindPage() {
         )}
       </div>
 
-      {selected && node(selected) && !hover ? <Spotlight node={node(selected)!} data={data!} onGo={(id) => (select(id), graph.current?.focus(id))} onLocal={(id) => (setCenter(id), setMode("local"))} /> : null}
+      {lens === "path" ? (
+        <PathPanel state={path} inView={(id) => !!node(id)} onGo={(id) => graph.current?.focus(id)} onReset={() => setPath({})} onClose={() => (setLens("none"), setPath({}))} />
+      ) : null}
+      {lens === "history" ? <HistoryBar projectIds={mode === "global" && scope ? [scope] : undefined} onGraph={setPast} onClose={() => setLens("none")} /> : null}
+      {past ? (
+        <div className="pointer-events-none absolute left-1/2 top-16 -translate-x-1/2 rounded-full border border-line bg-[#161616]/90 px-3 py-1 text-[11.5px] text-ink-2">
+          Viewing the past · changes you make still apply to now
+        </div>
+      ) : null}
+      {lens !== "path" && selected && node(selected) && !hover ? <Spotlight node={node(selected)!} data={shown!} onGo={(id) => (select(id), graph.current?.focus(id))} onLocal={(id) => (setCenter(id), setMode("local"))} /> : null}
 
       <ContextMenu
         at={menu}
@@ -264,6 +324,7 @@ export function MindPage() {
                 { label: "View connections", icon: <Share2 />, onSelect: () => (select(menu.id), setHighlight(new Set([menu.id, ...(data?.links ?? []).filter((l) => l.source_id === menu.id || l.target_id === menu.id).map((l) => (l.source_id === menu.id ? l.target_id : l.source_id))]))) },
                 { label: "Focus local graph", icon: <Focus />, onSelect: () => (setCenter(menu.id), setMode("local"), select(menu.id)) },
                 { label: "Center here", icon: <Crosshair />, onSelect: () => graph.current?.focus(menu.id) },
+                { label: "Find a path from here", icon: <Route />, onSelect: () => (setLens("path"), setPath({ from: { id: menu.id, title: node(menu.id)?.title ?? "memory" } })) },
                 { label: "View history", icon: <Archive className="rotate-180" />, onSelect: () => select(menu.id) },
                 ...(node(menu.id)?.pinned ? [{ label: "Unpin position", icon: <Pin />, onSelect: () => graph.current?.unpin(menu.id) }] : []),
                 {

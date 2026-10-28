@@ -244,6 +244,15 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
     "health.summary": () => b().health.summary(),
     "health.repairs": (p: { limit?: number } = {}) => b().health.repairs(p?.limit ?? 50),
     "health.propose": (p: { id: number }) => b().health.propose(Number(p.id), "user"),
+    // The Mind 3.0
+    "graph.path": (p: { from: string; to: string; max_depth?: number }) => b().mindTime.path(req(p.from, "from"), req(p.to, "to"), p.max_depth ?? 6),
+    "graph.at": (p: { at: string; projectIds?: string[] }) => b().mindTime.graphAt(req(p.at, "at"), { projectIds: p.projectIds }),
+    "graph.moments": () => b().mindTime.moments(),
+    "graph.attention": () => {
+      const ids = new Map<string, any[]>();
+      for (const f of b().findings.list({ kind: "awareness", status: "active", limit: 300 })) for (const id of f.memory_ids as string[]) (ids.get(id) ?? ids.set(id, []).get(id)!).push({ id: f.id, title: f.title, category: f.category, severity: f.severity });
+      return [...ids].map(([memory_id, findings]) => ({ memory_id, findings }));
+    },
     // MOTH Agents
     "agents.overview": () => b().agents.overview(),
     "agents.config": (p: { id: any; patch: any }) => b().agents.setConfig(req(p.id, "id"), p.patch ?? {}),
