@@ -320,3 +320,88 @@ database, and every result points back at the stored records it came from.
 - `core/scripts/bench.ts` measures the real engine on generated data at any size (build, startup, search, graph,
   Pulse, Mind queries, scans, agents, memory, idle CPU). Results for v0.4.0 are in `docs/benchmarks/` and the
   release notes; CI runs it on Windows (100 and 1,000 memories) and publishes the numbers as annotations.
+
+## v0.5.0 — Vault (Knowledge Library, notes, Obsidian import, workspace, updater)
+
+### Where things live (actual architecture)
+- The persistence and filesystem work runs in the **engine** (`core/`, TypeScript on Node 22, `node:sqlite`), which is
+  MOTH's backend process. The Rust/Tauri shell only hosts the window, tray, single instance, native dialogs and now
+  the updater. The UI never touches the filesystem: it calls narrowly scoped engine RPCs (`library.*`, `docs.*`,
+  `import.*`, `workspace.*`, `collections.*`); attachments are served read-only by `GET /api/attachments/:id`
+  (token-checked, only from MOTH's attachments folder, `nosniff`, sandbox CSP).
+- `core/src/vault/markdown.ts` (parsing), `library.ts` (notes, folders, links, revisions, attachments, collections,
+  workspace), `importer.ts` (scan / import / undo). UI: `pages/Library.tsx`, `components/NoteEditor.tsx`,
+  `Workspace.tsx`, `ImportWizard.tsx`, `lib/docstore.ts`, `lib/markdown.ts`, `lib/updater.ts`, `components/Updates.tsx`.
+
+### Migration v6 `vault`
+- New tables: `folders`, `documents` (+ `documents_fts`), `document_tags`, `document_aliases`, `document_revisions`,
+  `document_links`, `document_positions`, `collections`, `collection_items`, `attachments`, `attachment_refs`,
+  `import_batches`, `import_items`, `import_link_targets`, `workspace_sessions`. Nothing existing is changed.
+- **Before any migration of an existing database, a consistent copy is written** (`backups/before-schema-vN-*.db`,
+  `VACUUM INTO`); each migration runs in one transaction. Tested by turning a real database into the exact v0.4.0
+  schema (all v6 objects removed) and upgrading it.
+- Change-feed rows for documents are written by the library (one per edit, one per import batch), not per-row
+  triggers, so a 50,000-note import doesn't flood the live UI.
+- Query plans: SQLite has no statistics on a fresh database and would otherwise pick the (user, status) index;
+  hot lookups (title, alias, path, imported hash) use `INDEXED BY` so link resolution and duplicate checks stay O(log n).
+
+### Documents vs memories
+A document (note) is the user's own text, stored verbatim (frontmatter and unknown syntax included). A memory is a
+fact MOTH or Claude extracted. They stay separate entities; they connect through links (`[[memory:id]]` or a link
+added by hand), through Cortex provenance (`source_ref = document:<id>`), and in search and The Mind.
+
+### Notes and saving
+- Saves carry `base_version`; a save based on an older version is refused with code `conflict` (no stale overwrite).
+- Revisions: the previous state is kept at most every 10 minutes of editing, and always before rename, move, restore
+  and link rewrites. Restoring snapshots the current text first.
+- UI (`docstore`): one shared state per open note for all panes; debounced autosave (0.9 s); saves for one note
+  never overlap; drafts kept in browser storage until a save succeeds (offered back after a crash); flush on tab
+  switch, tab close, blur, hiding the window and before updates.
+- Rendering: `marked` → DOMPurify (no scripts, handlers, iframes, forms, inline SVG/MathML, styles); only http(s),
+  mailto, data images and MOTH attachment URLs survive; remote images are not loaded; links never navigate the app.
+
+### Smart Backlinks (deterministic resolution)
+1. Path links (`Folder/Note`, `./Note`, `../x/Note`, `Note.md`) → the note at that path (vault-relative for imported
+   notes, folder path otherwise). 2. Names → title or alias. One match → resolved. Several → same folder as the
+   linking note, then same import; still several → **ambiguous** (candidates stored), never a guess. 3. Not a note →
+   attachment by file name. Unsafe schemes are recorded as `unsafe`, web links as `external`.
+- Creating, renaming, archiving or restoring a note re-resolves the links that name it. Rename and move capture the
+  incoming links first and rewrite exactly those (in MOTH's copies only), so a rename never redirects links to a
+  different note with the old name; links that still find it through an alias are left as written.
+- Manual links (note → note / memory) are kept when the text is re-parsed.
+
+### Obsidian import (one-time, read-only source)
+- Scan: iterative directory walk (no recursion depth limit, symlinks not followed), manifest rows written in batches
+  of 500 (`import_items`), link targets and aliases recorded (`import_link_targets`); notes read one at a time,
+  attachments only measured. Preview numbers are SQL over the manifest. Disk space via `statfs`.
+- Import: a chain of background jobs, each working about a minute (so other jobs can run in between and a crash loses
+  at most one batch): notes in transactions of 100 with their manifest rows, then attachments streamed (hash + copy in
+  one pass, 1 MB chunks) into `attachments/<hash[0:2]>/<hash><ext>` (stored once per content; each name keeps its
+  own entry), then link resolution across the whole vault, then links in existing notes that now resolve.
+- Pause = cancel the current job and keep state; resume = enqueue again; restart recovery = the resumable job kind is
+  re-queued and continues with the rows still `pending`. Idempotent: finished rows are skipped.
+- Duplicates: a *confirmed* duplicate is the same vault-relative path with the same content from an earlier import
+  (skipped by default, or imported separately on request). Same text elsewhere is never merged.
+- Undo: removes the import's notes except those edited after the import, those linked from notes outside the import
+  and those with user-made links; attachments only when no note uses them; empty import folders deepest-first.
+- Tests compare the vault's full manifest (path, size, mtime, sha256) before and after; the vault is made read-only
+  for the test where the OS enforces it.
+
+### Workspace
+`workspace_sessions` stores `{ panes: [{ tabs: [{ key, kind, id, title, mode }], active }], focus }` (≤ 2 panes).
+On restore, tabs whose record no longer exists are dropped with a notice (`workspace.resolve`).
+
+### Updater (Tauri 2 official plugin)
+- `tauri-plugin-updater` + `tauri-plugin-process`; `plugins.updater.pubkey` (minisign public key), endpoint
+  `https://github.com/lk5t/moth/releases/latest/download/latest.json`, `windows.installMode = passive`;
+  `bundle.createUpdaterArtifacts = true`; capabilities `updater:default`, `process:allow-restart`.
+- Flow (`lib/updater.ts`): check → notice ("MOTH Update Available": installed → available, notes, Update now /
+  Later) → download with real byte progress (signature verified by the plugin) → `flushAll()` → engine
+  `system.prepareUpdate` (pause imports and remember them, drain the job queue, WAL checkpoint, backup copy) →
+  install (Windows: the app exits; the NSIS hook stops `moth-core.exe`) → relaunch → imports resume. If the install
+  doesn't happen, `system.resumeAfterUpdateAttempt` restarts background work.
+- CI: builds with `TAURI_SIGNING_PRIVATE_KEY` (secret), verifies the `.sig` with the public key from the config
+  (Ed25519 over BLAKE2b-512 + trusted-comment signature) and checks that a tampered copy fails, writes `latest.json`
+  only after that, and publishes installer, signature and manifest together.
+- Not verified yet: an end-to-end in-place update from one installed signed version to the next (needs two published
+  signed versions; the first possible test is v0.5.0 → v0.5.1).

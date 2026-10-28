@@ -179,7 +179,7 @@ export class Library {
   private uniqueTitle(title: string, folderId: string | null, exceptId?: string): string {
     let t = title;
     for (let i = 2; i < 1000; i++) {
-      const clash = this.db.value("SELECT 1 FROM documents WHERE user_id = ? AND COALESCE(folder_id, '') = ? AND title = ? COLLATE NOCASE AND status = 'active' AND id <> ?", [this.uid, folderId ?? "", t, exceptId ?? ""]);
+      const clash = this.db.value("SELECT 1 FROM documents INDEXED BY idx_docs_title WHERE user_id = ? AND COALESCE(folder_id, '') = ? AND title = ? COLLATE NOCASE AND status = 'active' AND id <> ?", [this.uid, folderId ?? "", t, exceptId ?? ""]);
       if (!clash) return t;
       t = `${title} ${i}`;
     }
@@ -238,7 +238,7 @@ export class Library {
     let title = d.title as string;
     if (patch.title !== undefined && patch.title.trim() !== d.title) {
       title = validTitle(patch.title);
-      const clash = this.db.value("SELECT 1 FROM documents WHERE user_id = ? AND COALESCE(folder_id, '') = ? AND title = ? COLLATE NOCASE AND status = 'active' AND id <> ?", [this.uid, d.folder_id ?? "", title, id]);
+      const clash = this.db.value("SELECT 1 FROM documents INDEXED BY idx_docs_title WHERE user_id = ? AND COALESCE(folder_id, '') = ? AND title = ? COLLATE NOCASE AND status = 'active' AND id <> ?", [this.uid, d.folder_id ?? "", title, id]);
       if (clash) throw new MothError("conflict", `Another note in this folder is already called "${title}"`);
     }
     if (content === d.content && title === d.title) return this.get(id);
@@ -273,7 +273,7 @@ export class Library {
     const d = this.doc(id);
     if (folderId) this.folder(folderId);
     if ((d.folder_id ?? null) === folderId) return this.get(id);
-    const clash = this.db.value("SELECT 1 FROM documents WHERE user_id = ? AND COALESCE(folder_id, '') = ? AND title = ? COLLATE NOCASE AND status = 'active' AND id <> ?", [this.uid, folderId ?? "", d.title, id]);
+    const clash = this.db.value("SELECT 1 FROM documents INDEXED BY idx_docs_title WHERE user_id = ? AND COALESCE(folder_id, '') = ? AND title = ? COLLATE NOCASE AND status = 'active' AND id <> ?", [this.uid, folderId ?? "", d.title, id]);
     if (clash) throw new MothError("conflict", `The destination already has a note called "${d.title}"`);
     const pre = this.incomingTargets(id);
     this.db.run("UPDATE documents SET folder_id = ?, updated_at = ? WHERE id = ?", [folderId, nowIso(), id]);
@@ -350,9 +350,10 @@ export class Library {
     if (q) {
       const terms = [...new Set(rawWords(q))].slice(0, 12);
       if (!terms.length) return { items: [], total: 0 };
-      from = "documents_fts JOIN documents d ON d.rowid = documents_fts.rowid";
+      from = "documents_fts CROSS JOIN documents d ON d.rowid = documents_fts.rowid"; // the search index drives the query
       where.push("documents_fts MATCH :q");
-      p.q = terms.map((t) => `"${t.replace(/"/g, "")}"*`).join(" AND ");
+      // Whole words, except the last one (still being typed) which matches as a prefix.
+      p.q = terms.map((t, i) => `"${t.replace(/"/g, "")}"${i === terms.length - 1 ? "*" : ""}`).join(" AND ");
       if (!f.sort) order = "bm25(documents_fts, 8.0, 1.0, 3.0)";
     }
     const limit = Math.max(1, Math.min(500, f.limit ?? 100));
@@ -452,12 +453,12 @@ export class Library {
       for (const p of tries) {
         const lp = p.toLowerCase();
         if (src.import_batch_id) {
-          const hit = this.db.all<Row>("SELECT id, title, folder_id FROM documents WHERE user_id = ? AND status = 'active' AND import_batch_id = ? AND (lower(source_path) = ? OR lower(source_path) = ?)", [this.uid, src.import_batch_id, `${lp}.md`, `${lp}.markdown`]);
+          const hit = this.db.all<Row>("SELECT id, title, folder_id FROM documents INDEXED BY idx_docs_srcpath WHERE import_batch_id = ? AND source_path IN (? COLLATE NOCASE, ? COLLATE NOCASE) AND status = 'active' AND user_id = ?", [src.import_batch_id, `${lp}.md`, `${lp}.markdown`, this.uid]);
           if (hit.length === 1) return { status: "resolved", target_id: hit[0].id as string, candidates: [] };
         }
         const base = path.posix.basename(p);
         const dir = path.posix.dirname(p);
-        const byName = this.db.all<Row>("SELECT id, title, folder_id FROM documents WHERE user_id = ? AND status = 'active' AND title = ? COLLATE NOCASE", [this.uid, base]);
+        const byName = this.db.all<Row>("SELECT id, title, folder_id FROM documents INDEXED BY idx_docs_title WHERE title = ? COLLATE NOCASE AND status = 'active' AND user_id = ?", [base, this.uid]);
         const exact = byName.filter((r) => this.folderPath(r.folder_id as string).toLowerCase().endsWith(dir.toLowerCase()));
         if (exact.length === 1) return { status: "resolved", target_id: exact[0].id as string, candidates: [] };
         if (exact.length > 1) return { status: "ambiguous", target_id: null, candidates: cand(exact) };
@@ -466,9 +467,9 @@ export class Library {
     }
     const name = t.replace(/\.(md|markdown)$/i, "");
     let rows = this.db.all<Row>(
-      `SELECT id, title, folder_id, import_batch_id FROM documents WHERE user_id = ? AND status = 'active' AND title = ? COLLATE NOCASE
-       UNION SELECT d.id, d.title, d.folder_id, d.import_batch_id FROM document_aliases a JOIN documents d ON d.id = a.document_id WHERE d.user_id = ? AND d.status = 'active' AND a.alias = ? COLLATE NOCASE`,
-      [this.uid, name, this.uid, name],
+      `SELECT id, title, folder_id, import_batch_id FROM documents INDEXED BY idx_docs_title WHERE title = ? COLLATE NOCASE AND status = 'active' AND user_id = ?
+       UNION SELECT d.id, d.title, d.folder_id, d.import_batch_id FROM document_aliases a INDEXED BY idx_docaliases_alias JOIN documents d ON d.id = a.document_id WHERE a.alias = ? COLLATE NOCASE AND d.user_id = ? AND d.status = 'active'`,
+      [name, this.uid, name, this.uid],
     );
     if (rows.length === 1) return { status: "resolved", target_id: rows[0].id as string, candidates: [] };
     if (!rows.length) return { status: "unresolved", target_id: null, candidates: [] };
@@ -538,7 +539,7 @@ export class Library {
   private rewriteSources(docId: string, pre: Map<string, string[]>, pathOnly: boolean): number {
     const d = this.doc(docId);
     const newPath = this.notePath(d);
-    const titleUnique = Number(this.db.value("SELECT COUNT(*) FROM documents WHERE user_id = ? AND status = 'active' AND title = ? COLLATE NOCASE", [this.uid, d.title]) ?? 0) === 1;
+    const titleUnique = Number(this.db.value("SELECT COUNT(*) FROM documents INDEXED BY idx_docs_title WHERE title = ? COLLATE NOCASE AND status = 'active' AND user_id = ?", [d.title, this.uid]) ?? 0) === 1;
     let changed = 0;
     for (const [sid, targets] of pre) {
       const s = this.doc(sid);
@@ -681,6 +682,10 @@ export class Library {
     this.changed("collection", id, "update");
     return { ok: true };
   }
+  /** Which collections contain this note / memory / project. */
+  collectionsOf(kind: string, entityId: string): string[] {
+    return this.db.all<Row>("SELECT i.collection_id FROM collection_items i JOIN collections c ON c.id = i.collection_id WHERE c.user_id = ? AND i.entity_kind = ? AND i.entity_id = ?", [this.uid, kind, entityId]).map((r) => r.collection_id as string);
+  }
   collectionItems(id: string): Row[] {
     return this.db.all<Row>(
       `SELECT i.entity_kind, i.entity_id, i.added_at,
@@ -719,12 +724,17 @@ export class Library {
   removeAttachmentIfUnused(id: string): boolean {
     const refs = Number(this.db.value("SELECT COUNT(*) FROM attachment_refs WHERE attachment_id = ?", [id]) ?? 0);
     if (refs) return false;
-    const { file } = this.attachmentFile(id);
+    const { file, row } = this.attachmentFile(id);
     this.db.run("DELETE FROM attachments WHERE id = ?", [id]);
-    try {
-      fs.rmSync(file, { force: true });
-    } catch {
-      /* already gone */
+    // The stored file can be shared by entries with the same content: delete it only when none is left.
+    const shared = this.db.value("SELECT 1 FROM attachments WHERE storage_path = ?", [row.storage_path]);
+    if (!shared) {
+      try {
+        fs.rmSync(file, { force: true });
+        fs.rmdirSync(path.dirname(file)); // the per-hash folder, only if now empty (throws otherwise)
+      } catch {
+        /* already gone, or the folder still holds other files */
+      }
     }
     return true;
   }

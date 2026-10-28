@@ -196,3 +196,52 @@ button:not(:disabled):active { transform: translateY(0.5px) scale(0.985); }
 :root[data-motion="minimal"] .moth-shimmer,
 :root[data-motion="minimal"] .moth-page,
 :root[data-motion="minimal"] .moth-pop { animation: none; }
+
+/* ---------------- MOTH Notes (v0.5.0) ---------------- */
+/* The editor's textarea and its highlight layer must share exact metrics. */
+.moth-src {
+  margin: 0;
+  padding: 20px 28px 40vh;
+  font: 13.5px/1.7 "Geist Mono Variable", "Cascadia Code", "Consolas", ui-monospace, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+  letter-spacing: 0;
+  border: 0;
+}
+pre.moth-src { color: var(--color-ink-2); }
+textarea.moth-src { overflow-y: auto; -webkit-text-fill-color: transparent; user-select: text; -webkit-user-select: text; }
+.hl-h { color: var(--color-ink); }
+.hl-b { color: var(--color-ink); }
+.hl-link { color: var(--color-accent-soft); }
+.hl-tag { color: #9fb4d9; }
+.hl-code { color: #c9b48f; }
+.hl-muted { color: var(--color-ink-3); }
+.hl-quote { color: var(--color-ink-3); }
+
+.moth-prose { max-width: 760px; margin: 0 auto; color: var(--color-ink-2); font-size: 14px; line-height: 1.75; }
+.moth-prose h1, .moth-prose h2, .moth-prose h3, .moth-prose h4 { color: var(--color-ink); line-height: 1.3; margin: 1.4em 0 0.5em; font-weight: 560; }
+.moth-prose h1 { font-size: 24px; margin-top: 0.2em; }
+.moth-prose h2 { font-size: 19px; }
+.moth-prose h3 { font-size: 16px; }
+.moth-prose p { margin: 0.7em 0; }
+.moth-prose ul, .moth-prose ol { margin: 0.6em 0; padding-left: 1.4em; }
+.moth-prose ul { list-style: disc; }
+.moth-prose ol { list-style: decimal; }
+.moth-prose li.moth-task { list-style: none; margin-left: -1.2em; }
+.moth-prose .moth-check { display: inline-block; width: 12px; height: 12px; border: 1px solid var(--color-line-strong); border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
+.moth-prose .moth-check.done { background: var(--color-accent); border-color: var(--color-accent); }
+.moth-prose a { color: var(--color-accent-soft); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent); cursor: pointer; }
+.moth-prose a.moth-unresolved { color: var(--color-ink-3); border-bottom-style: dashed; }
+.moth-prose a.moth-ambiguous { color: var(--color-warn); border-bottom-style: dotted; }
+.moth-prose code { font-family: "Geist Mono Variable", "Cascadia Code", Consolas, monospace; font-size: 12.5px; background: var(--color-surface-2); padding: 1px 5px; border-radius: 5px; color: #d8cfb8; }
+.moth-prose pre { background: #121217; border: 1px solid var(--color-line); border-radius: 10px; padding: 12px 14px; overflow-x: auto; }
+.moth-prose pre code { background: none; padding: 0; }
+.moth-prose blockquote { border-left: 2px solid color-mix(in srgb, var(--color-accent) 45%, transparent); padding-left: 12px; color: var(--color-ink-3); margin: 0.8em 0; }
+.moth-prose table { border-collapse: collapse; margin: 0.8em 0; font-size: 13px; }
+.moth-prose th, .moth-prose td { border: 1px solid var(--color-line); padding: 5px 10px; text-align: left; }
+.moth-prose th { color: var(--color-ink); background: var(--color-surface); }
+.moth-prose img { max-width: 100%; border-radius: 8px; border: 1px solid var(--color-line); }
+.moth-prose img:not([src]) { display: inline-block; padding: 2px 6px; font-size: 12px; color: var(--color-ink-3); }
+.moth-prose hr { border: 0; border-top: 1px solid var(--color-line); margin: 1.5em 0; }
+.moth-prose .moth-props { font-size: 11.5px; color: var(--color-ink-3); background: transparent; border: 1px dashed var(--color-line); white-space: pre-wrap; }

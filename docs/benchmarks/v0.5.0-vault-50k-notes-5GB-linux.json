@@ -1,0 +1,49 @@
+{
+  "vault": {
+    "notes": 50000,
+    "folders": 2016,
+    "attachment_files": 1280,
+    "attachment_bytes": 5368709120,
+    "generate_ms": 13238
+  },
+  "scan": {
+    "ms": 5667,
+    "status": "scanned",
+    "notes": 50000,
+    "links": 125516,
+    "unresolved": 0
+  },
+  "import": {
+    "ms": 162142,
+    "status": "done",
+    "result": {
+      "notes": 50000,
+      "folders": 2026,
+      "attachments": 1280,
+      "links_resolved": 125516,
+      "links_unresolved": 0,
+      "links_ambiguous": 0,
+      "skipped": 0,
+      "duplicates": 0,
+      "errors": 0,
+      "duration_ms": 161451
+    },
+    "error": null
+  },
+  "peak_rss_mb": 187,
+  "longest_event_loop_block_ms": 692,
+  "database_mb": 247,
+  "attachments_stored_mb": 5120,
+  "search_ms": {
+    "p50": 2.6,
+    "p95": 11.7
+  },
+  "source_unchanged": true,
+  "env": {
+    "node": "v22.22.0",
+    "platform": "linux 6.18.44-fc-v180",
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "cores": 2,
+    "ram_gb": 8
+  }
+}

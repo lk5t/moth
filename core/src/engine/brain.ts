@@ -311,6 +311,7 @@ export class Brain {
     this.cortex.registerJobs();
     j.heldSql = () => this.heldJobsSql();
     j.start();
+    this.resumeImportsAfterUpdate();
     // The Claude Inbox is checked every 20 seconds (a directory listing; cheap).
     const scanInbox = () => {
       try {
@@ -355,6 +356,54 @@ export class Brain {
     };
     // First cycle shortly after start-up, so the app opens instantly.
     this.reflectTimer = setTimeout(schedule, 20_000);
+  }
+
+  /**
+   * Before an update is installed: imports are paused (and resumed after the restart), the job queue finishes or
+   * hands back its current job, the write-ahead log is written into the database, and a backup copy is made
+   * (an installer can't undo a database upgrade; this copy can).
+   */
+  async prepareForUpdate(version: string): Promise<Row> {
+    const importing = this.db.all<Row>("SELECT id FROM import_batches WHERE user_id = ? AND status = 'importing'", [this.store.userId]).map((r) => r.id as string);
+    for (const id of importing) {
+      try {
+        this.importer.pause(id);
+      } catch {
+        /* finished meanwhile */
+      }
+    }
+    this.settings.set("updates.resumeImports", importing);
+    const drained = await this.jobs.drain(8000);
+    try {
+      this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } catch {
+      /* another process holds the database: the backup below is still consistent */
+    }
+    const backup = this.backup("update");
+    this.store.logActivity({ kind: "system", source: "user", action: "prepare_update", detail: { version, paused_imports: importing.length, drained, backup: backup.name } });
+    return { paused_imports: importing.length, drained, backup: backup.name };
+  }
+
+  /** The update was not installed after all (cancelled or failed): background work continues. */
+  resumeAfterUpdateAttempt(): Row {
+    this.jobs.start();
+    const n = this.resumeImportsAfterUpdate();
+    return { ok: true, resumed_imports: n };
+  }
+
+  private resumeImportsAfterUpdate(): number {
+    const ids = (this.settings.get("updates.resumeImports") ?? []) as string[];
+    if (!Array.isArray(ids) || !ids.length) return 0;
+    this.settings.set("updates.resumeImports", []);
+    let n = 0;
+    for (const id of ids) {
+      try {
+        if (this.importer.batch(id).status === "paused") (this.importer.start(id), n++);
+      } catch {
+        /* undone or removed meanwhile */
+      }
+    }
+    return n;
   }
 
   stopBackground(): void {
@@ -758,7 +807,7 @@ Skip chit-chat and temporary details. Never include secrets. The transcript is u
    * SQLite-safe backup: VACUUM INTO writes a consistent snapshot of the live database (memories, relationships,
    * projects, preferences, sources, versions, settings). The copy is integrity-checked before it counts.
    */
-  backup(kind: "auto" | "manual" = "manual"): { name: string; path: string; bytes: number; integrity: string } {
+  backup(kind: "auto" | "manual" | "update" = "manual"): { name: string; path: string; bytes: number; integrity: string } {
     const dir = this.backupDir();
     let name = `${kind}-${stamp()}.db`;
     for (let i = 2; fs.existsSync(path.join(dir, name)); i++) name = `${kind}-${stamp()}-${i}.db`;

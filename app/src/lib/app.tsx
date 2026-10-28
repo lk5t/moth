@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 
-export type Page = "overview" | "mind" | "memories" | "projects" | "metamorphosis" | "cortex" | "inbox" | "adaptation" | "research" | "timeline" | "activity" | "connections" | "settings" | "guide" | "health" | "discoveries" | "agents";
+export type Page = "overview" | "mind" | "memories" | "projects" | "metamorphosis" | "cortex" | "inbox" | "adaptation" | "research" | "timeline" | "activity" | "connections" | "settings" | "guide" | "health" | "discoveries" | "agents" | "library";
 
 export interface Toast {
   id: number;

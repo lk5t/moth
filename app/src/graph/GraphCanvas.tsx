@@ -48,6 +48,8 @@ export interface GraphNodeData {
   /** User-pinned ("starred") memory: a core memory that breathes softly. */
   starred?: boolean;
   memory_type?: string;
+  /** "document" for notes from the Knowledge Library (drawn as small rounded squares); memories otherwise. */
+  kind?: string;
 }
 
 export interface GraphLinkData {
@@ -173,6 +175,7 @@ const NODE = "#BDBDC8";
 const NODE_BRIGHT = "#EEEDF4";
 const NODE_FAINT = "#8F8F9E";
 const NODE_HUB = "#D9D3F5";
+const DOC_FILL = "#A9B8D8";
 
 /** Luminous white / grey / muted lavender cores, by what the memory is. */
 function coreColor(n: { category: string; importance: number; starred?: boolean }): string {
@@ -594,7 +597,12 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
       ctx.globalAlpha = Math.max(0.06, alpha);
       ctx.fillStyle = fill;
       ctx.beginPath();
-      ctx.arc(n.x!, n.y!, n.r * scale, 0, Math.PI * 2);
+      if (n.kind === "document") {
+        // Notes: small rounded squares in a cool blue-grey, so they read differently from memories.
+        const r = n.r * scale * 0.92;
+        if (fill === NODE || fill === NODE_BRIGHT || fill === NODE_FAINT || fill === NODE_HUB) ctx.fillStyle = DOC_FILL;
+        ctx.roundRect(n.x! - r, n.y! - r, r * 2, r * 2, r * 0.45);
+      } else ctx.arc(n.x!, n.y!, n.r * scale, 0, Math.PI * 2);
       ctx.fill();
       if (n.id === p.selectedId) {
         ctx.globalAlpha = 0.9;

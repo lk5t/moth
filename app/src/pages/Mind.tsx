@@ -30,7 +30,9 @@ export function useGraphSettings() {
 }
 
 export function MindPage() {
-  const { params, select, selected, edit, toast } = useApp();
+  const { params, select, selected, edit, toast, go } = useApp();
+  const [docSel, setDocSel] = useState<string | null>(null);
+  const isDoc = (id: string | null | undefined) => !!id && id.startsWith("doc_");
   const [settings, update] = useGraphSettings();
   const [mode, setMode] = useState<"global" | "local">(params.focus ? "local" : "global");
   const [center, setCenter] = useState<string | null>(params.focus ?? null);
@@ -162,7 +164,8 @@ export function MindPage() {
   if (!settings) return <div className="h-full bg-graph" />;
   const shown = past ?? data;
   const node = (id: string) => shown?.nodes.find((n: GraphNodeData) => n.id === id);
-  const counts = shown ? `${shown.nodes.length.toLocaleString()} memories, ${shown.links.length.toLocaleString()} connections` : "";
+  const docCount = shown ? shown.nodes.filter((n: any) => n.kind === "document").length : 0;
+  const counts = shown ? `${(shown.nodes.length - docCount).toLocaleString()} memories${docCount ? `, ${docCount.toLocaleString()} notes` : ""}, ${shown.links.length.toLocaleString()} connections${(data as any)?.documents && (data as any).documents.total > (data as any).documents.shown ? ` (showing ${(data as any).documents.shown.toLocaleString()} of ${(data as any).documents.total.toLocaleString()} notes)` : ""}` : "";
 
   return (
     <div className="relative h-full overflow-hidden bg-graph">
@@ -181,12 +184,21 @@ export function MindPage() {
           motion={motion}
           ambient={ambient}
           clusters={mode === "global" ? clusterNames : undefined}
-          onSelect={(id) => (lens === "path" ? id && pickForPath(id) : select(id))}
+          onSelect={(id) => {
+            if (lens === "path") {
+              if (isDoc(id)) return toast({ kind: "info", text: "Paths follow connections between memories; notes aren't part of paths yet." });
+              return id && pickForPath(id);
+            }
+            if (isDoc(id)) return (setDocSel(id), select(null));
+            setDocSel(null);
+            select(id);
+          }}
           onFocus={(id) => {
+            if (isDoc(id)) return go("library", { open: id });
             graph.current?.focus(id, 2);
             select(id);
           }}
-          onContext={(id, x, y) => setMenu({ id, x, y })}
+          onContext={(id, x, y) => (isDoc(id) ? setDocSel(id) : setMenu({ id, x, y }))}
           onHover={setHover}
           onPositions={onPositions}
         />
@@ -309,6 +321,17 @@ export function MindPage() {
       {past ? (
         <div className="pointer-events-none absolute left-1/2 top-16 -translate-x-1/2 rounded-full border border-line bg-[#161616]/90 px-3 py-1 text-[11.5px] text-ink-2">
           Viewing the past · changes you make still apply to now
+        </div>
+      ) : null}
+      {lens !== "path" && docSel && node(docSel) && !hover ? (
+        <div className="absolute bottom-4 left-4 w-[320px] rounded-[14px] border border-line bg-[#161616]/95 p-3.5 shadow-[0_16px_50px_rgba(0,0,0,0.5)] backdrop-blur" data-testid="note-spotlight">
+          <div className="text-[11px] uppercase tracking-[0.14em] text-ink-3">Note</div>
+          <div className="mt-1 text-[14px] text-ink">{node(docSel)!.title}</div>
+          <div className="mt-0.5 text-[11.5px] text-ink-3">{node(docSel)!.degree} link{node(docSel)!.degree === 1 ? "" : "s"} · from your Library{(node(docSel) as any).source === "obsidian" ? " (imported)" : ""}</div>
+          <div className="mt-2 flex gap-2">
+            <Button size="sm" variant="primary" onClick={() => go("library", { open: docSel })}>Open note</Button>
+            <Button size="sm" variant="ghost" onClick={() => setDocSel(null)}>Close</Button>
+          </div>
         </div>
       ) : null}
       {lens !== "path" && selected && node(selected) && !hover ? <Spotlight node={node(selected)!} data={shown!} onGo={(id) => (select(id), graph.current?.focus(id))} onLocal={(id) => (setCenter(id), setMode("local"))} /> : null}

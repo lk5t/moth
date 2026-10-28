@@ -8,6 +8,7 @@ import { getAutostart, keyringGet, keyringSet, openExternal, pickFiles, pickFold
 import { cn, timeAgo } from "../lib/utils";
 import { useGraphSettings } from "./Mind";
 import { setMotionSetting } from "../lib/motion";
+import { UpdatesSettings } from "../components/Updates";
 
 const SECTIONS = [
   ["general", "General"],
@@ -17,6 +18,7 @@ const SECTIONS = [
   ["privacy", "Privacy and permissions"],
   ["graph", "Graph physics"],
   ["data", "Data and backups"],
+  ["updates", "Updates"],
   ["account", "Account"],
 ] as const;
 type Section = (typeof SECTIONS)[number][0];
@@ -64,6 +66,8 @@ export function SettingsPage({ onRestartFirstFlight }: { onRestartFirstFlight?: 
             <GraphPhysics />
           ) : section === "data" ? (
             <Data />
+          ) : section === "updates" ? (
+            <UpdatesSettings s={s} set={set} />
           ) : (
             <Account s={s} set={set} />
           )}

@@ -1,4 +1,4 @@
-import { Activity, Bot, BookOpenCheck, HeartPulse, Sparkles, Brain, Cable, ChevronRight, CircleHelp, Clock3, Copy, Cpu, FolderKanban, Inbox, LayoutDashboard, Library, Minus, Moon, PanelLeftClose, PanelLeftOpen, Search, Settings, ShieldOff, Square, UserRound, X, Zap } from "lucide-react";
+import { Activity, Bot, BookOpenCheck, NotebookPen, HeartPulse, Sparkles, Brain, Cable, ChevronRight, CircleHelp, Clock3, Copy, Cpu, FolderKanban, Inbox, LayoutDashboard, Library, Minus, Moon, PanelLeftClose, PanelLeftOpen, Search, Settings, ShieldOff, Square, UserRound, X, Zap } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState, type ReactNode } from "react";
 import { isTauri, onConnection } from "../lib/api";
@@ -17,6 +17,7 @@ type NavItem = { page: Page; label: string; icon: ReactNode; key: string };
 export const NAV: NavItem[] = [
   { page: "overview", label: "Overview", icon: <LayoutDashboard />, key: "1" },
   { page: "mind", label: "The Mind", icon: <Brain />, key: "2" },
+  { page: "library", label: "Library", icon: <NotebookPen />, key: "" },
   { page: "memories", label: "Memories", icon: <Library />, key: "3" },
   { page: "projects", label: "Projects", icon: <FolderKanban />, key: "4" },
   { page: "agents", label: "Agents", icon: <Bot />, key: "5" },
@@ -30,7 +31,7 @@ export const NAV: NavItem[] = [
 ];
 /** Sidebar groups (by page, so Ctrl+1…9 can follow NAV's order independently). */
 const GROUPS: { label: string | null; pages: Page[] }[] = [
-  { label: null, pages: ["overview", "mind", "memories", "projects"] },
+  { label: null, pages: ["overview", "mind", "library", "memories", "projects"] },
   { label: "Intelligence", pages: ["agents", "discoveries", "health", "inbox", "cortex"] },
   { label: "Knowledge", pages: ["adaptation", "research", "timeline"] },
 ];

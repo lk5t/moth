@@ -44,11 +44,13 @@ export interface ImportOptions {
 const DEFAULT_EXCLUDED_DIRS = new Set([".obsidian", ".trash", ".git", ".github", "node_modules"]);
 const NOTE_READ_LIMIT = 20 * 1024 * 1024; // larger "notes" are recorded as failed (they can't be edited as notes anyway)
 const SLICE_MS = 60_000; // one import job works for about a minute, then hands over to the next
-const DB_BATCH = 200;
+const DB_BATCH = 100;
 
 const yieldNow = () => new Promise((r) => setImmediate(r));
 
 export class VaultImporter {
+  /** How long one import job works before handing over (tests shorten it to simulate interruptions). */
+  sliceMs = SLICE_MS;
   constructor(private brain: Brain) {}
 
   private get db() {
@@ -233,15 +235,15 @@ export class VaultImporter {
     ins(`INSERT OR IGNORE INTO temp.import_names SELECT substr(target, 8) FROM import_link_targets WHERE batch_id = ? AND target LIKE '#alias:%'`);
     const unresolvedRows = this.db.all<Row>(
       `SELECT t.target, COUNT(*) AS n FROM import_link_targets t WHERE t.batch_id = ? AND t.target NOT LIKE '#alias:%'
-         AND NOT EXISTS (SELECT 1 FROM temp.import_names x WHERE x.n = t.target OR x.n = replace(t.target, './', '') OR t.target LIKE '%/' || x.n)
+         AND NOT EXISTS (SELECT 1 FROM temp.import_names x WHERE x.n IN (t.target, replace(t.target, './', ''), CASE WHEN instr(t.target, '/') > 0 THEN replace(t.target, rtrim(t.target, replace(t.target, '/', '')), '') ELSE t.target END))
        GROUP BY t.target ORDER BY n DESC`,
       [batchId],
     );
     this.db.exec("DROP TABLE IF EXISTS temp.import_names");
     const unresolved = unresolvedRows.reduce((s, r) => s + Number(r.n), 0);
     // Duplicates: notes identical to notes already in MOTH (earlier imports or your own), and identical files within the vault.
-    const dupExisting = n(`SELECT COUNT(*) FROM import_items i WHERE i.batch_id = ? AND i.kind = 'note' AND i.status = 'pending' AND EXISTS (SELECT 1 FROM documents d WHERE d.user_id = ? AND d.status = 'active' AND d.imported_hash = i.sha256 AND d.source_path = i.rel_path)`, [batchId, this.uid]);
-    const sameTextElsewhere = n(`SELECT COUNT(*) FROM import_items i WHERE i.batch_id = ? AND i.kind = 'note' AND i.status = 'pending' AND i.size > 0 AND EXISTS (SELECT 1 FROM documents d WHERE d.user_id = ? AND d.status = 'active' AND d.content_hash = i.sha256 AND COALESCE(d.source_path, '') <> i.rel_path)`, [batchId, this.uid]);
+    const dupExisting = n(`SELECT COUNT(*) FROM import_items i WHERE i.batch_id = ? AND i.kind = 'note' AND i.status = 'pending' AND EXISTS (SELECT 1 FROM documents d INDEXED BY idx_docs_imported WHERE d.imported_hash = i.sha256 AND d.source_path = i.rel_path AND d.status = 'active' AND d.user_id = ?)`, [batchId, this.uid]);
+    const sameTextElsewhere = n(`SELECT COUNT(*) FROM import_items i WHERE i.batch_id = ? AND i.kind = 'note' AND i.status = 'pending' AND i.size > 0 AND EXISTS (SELECT 1 FROM documents d INDEXED BY idx_docs_hash WHERE d.content_hash = i.sha256 AND COALESCE(d.source_path, '') <> i.rel_path AND d.status = 'active' AND d.user_id = ?)`, [batchId, this.uid]);
     const dupWithin = n(`SELECT COALESCE(SUM(c - 1), 0) FROM (SELECT COUNT(*) AS c FROM import_items WHERE batch_id = ? AND kind = 'note' AND status = 'pending' AND size > 0 GROUP BY sha256 HAVING c > 1)`);
     const sameTitles = this.db.all<Row>(
       `SELECT lower(replace(replace(CASE WHEN instr(rel_path, '/') > 0 THEN replace(rel_path, rtrim(rel_path, replace(rel_path, '/', '')), '') ELSE rel_path END, '.markdown', ''), '.md', '')) AS name, COUNT(*) AS n
@@ -342,7 +344,9 @@ export class VaultImporter {
     const stop = () => {
       if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Cancelled");
     };
-    const outOfTime = () => Date.now() - t0 > SLICE_MS;
+    // Each phase always makes progress (at least one batch per slice), then stops when the slice's time is up.
+    let worked = false;
+    const outOfTime = () => worked && Date.now() - t0 > this.sliceMs;
 
     // Root folder in the library (once).
     let rootFolder = (b.root_folder_id as string) ?? null;
@@ -381,6 +385,7 @@ export class VaultImporter {
       stop();
       const rows = this.db.all<Row>("SELECT * FROM import_items WHERE batch_id = ? AND kind = 'note' AND status = 'pending' ORDER BY rel_path LIMIT ?", [batchId, DB_BATCH]);
       if (!rows.length) break;
+      worked = true;
       const prepared: { row: Row; text?: string; error?: string }[] = [];
       for (const r of rows) {
         try {
@@ -401,7 +406,7 @@ export class VaultImporter {
           if (opts.duplicates !== "separate") {
             // A confirmed duplicate is the same file (same place in the vault, same content) from an earlier import.
             // Identical text elsewhere (e.g. two empty notes) is NOT treated as a duplicate: those are separate notes.
-            const dup = this.db.get<Row>("SELECT id FROM documents WHERE user_id = ? AND status = 'active' AND imported_hash = ? AND source_path = ? LIMIT 1", [this.uid, hash, rel]);
+            const dup = this.db.get<Row>("SELECT id FROM documents INDEXED BY idx_docs_imported WHERE imported_hash = ? AND source_path = ? AND status = 'active' AND user_id = ? LIMIT 1", [hash, rel, this.uid]);
             if (dup) {
               this.db.run("UPDATE import_items SET status = 'duplicate', entity_id = ?, detail = 'Already imported earlier (same file, same content)' WHERE batch_id = ? AND rel_path = ?", [dup.id, batchId, rel]);
               continue;
@@ -436,6 +441,7 @@ export class VaultImporter {
         stop();
         const r = this.db.get<Row>("SELECT * FROM import_items WHERE batch_id = ? AND kind = 'attachment' AND status = 'pending' ORDER BY rel_path LIMIT 1", [batchId]);
         if (!r) break;
+        worked = true;
         const rel = String(r.rel_path);
         try {
           const id = await this.copyAttachment(path.join(root, rel), path.posix.basename(rel), batchId, signal, (partial) => {
@@ -462,6 +468,7 @@ export class VaultImporter {
           after = "~done";
           break;
         }
+        worked = true;
         this.db.tx(() => {
           for (const d of docs) lib.indexLinks(d.id as string);
         });
@@ -509,10 +516,18 @@ export class VaultImporter {
     try {
       await pipeline(fs.createReadStream(src, { highWaterMark: 1024 * 1024 }), meter, fs.createWriteStream(tmp), { signal });
       const digest = hash.digest("hex");
-      const existing = this.db.get<Row>("SELECT id, storage_path FROM attachments WHERE user_id = ? AND sha256 = ?", [this.brain.store.userId, digest]);
-      if (existing) {
+      // Stored once per content: the same file under another name gets its own entry pointing at the same stored file.
+      const same = this.db.get<Row>("SELECT id FROM attachments WHERE user_id = ? AND sha256 = ? AND original_name = ? COLLATE NOCASE", [this.brain.store.userId, digest, name]);
+      if (same) {
         fs.rmSync(tmp, { force: true });
-        return existing.id as string;
+        return same.id as string;
+      }
+      const stored = this.db.get<Row>("SELECT storage_path FROM attachments WHERE user_id = ? AND sha256 = ? LIMIT 1", [this.brain.store.userId, digest]);
+      if (stored && fs.existsSync(path.join(dir, String(stored.storage_path)))) {
+        fs.rmSync(tmp, { force: true });
+        const id = newId("att");
+        this.db.run("INSERT INTO attachments(id, user_id, original_name, storage_path, sha256, size, media_type, import_batch_id, created_at) VALUES (?,?,?,?,?,?,?,?,?)", [id, this.brain.store.userId, name, stored.storage_path, digest, n, mediaType(name), batchId, nowIso()]);
+        return id;
       }
       const ext = path.extname(name).toLowerCase().replace(/[^a-z0-9.]/g, "").slice(0, 12);
       const rel = `${digest.slice(0, 2)}/${digest}${ext}`;
@@ -621,6 +636,27 @@ export class VaultImporter {
     this.db.run("INSERT INTO db_changes(entity, entity_id, op) VALUES ('document', ?, 'delete')", [batchId]);
     this.brain.store.logActivity({ kind: "import", source: "user", action: "undone", detail: { batch: batchId, ...result } });
     return result;
+  }
+
+  /**
+   * Optional, after an import: lets Cortex (the local AI) read up to `limit` imported notes and propose memories
+   * from them, through the normal learning pipeline (your review settings apply; each memory keeps the note as its
+   * source). Never required for importing; never rewrites the notes. Each note is its own cancellable job.
+   */
+  analyze(batchId: string, opts: { limit?: number } = {}): Row {
+    this.batch(batchId);
+    const ready = this.brain.cortex.readiness();
+    if (!ready.ok) throw new MothError("unavailable", `Cortex isn't available: ${ready.reason}. Importing works without it.`);
+    if (this.brain.learningHeld()) throw new MothError("paused", "Learning is paused or Privacy Mode is on, so Cortex won't analyse notes now.");
+    const limit = Math.max(1, Math.min(200, Number(opts.limit ?? 25)));
+    const docs = this.db.all<Row>("SELECT id, title, content FROM documents WHERE import_batch_id = ? AND status = 'active' AND words >= 30 ORDER BY words DESC LIMIT ?", [batchId, limit]);
+    const jobs: number[] = [];
+    for (const d of docs) {
+      const text = String(d.content).replace(/^---[\s\S]*?\n---\s*/, "").slice(0, 20000);
+      jobs.push(this.brain.cortex.enqueueLearn({ text: `${d.title}\n\n${text}`, source: "library", source_ref: `document:${d.id}` } as any, "user"));
+    }
+    this.brain.store.logActivity({ kind: "import", source: "user", action: "analyze", detail: { batch: batchId, notes: docs.length } });
+    return { queued: jobs.length, job_ids: jobs, skipped_short: Number(this.db.value("SELECT COUNT(*) FROM documents WHERE import_batch_id = ? AND status = 'active' AND words < 30", [batchId]) ?? 0) };
   }
 
   registerJobs(): void {

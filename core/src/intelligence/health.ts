@@ -34,6 +34,7 @@ export const HEALTH_CHECKS = {
   stale_project: { label: "Stale project context", how: "Projects with open blockers, decisions or tasks but no activity for 60 days.", certainty: "possible" },
   inconsistent_preference: { label: "Inconsistent preferences", how: "Active preferences in the same area with similar wording where one says the opposite (never/don't/avoid vs. always/do).", certainty: "possible" },
   search_index: { label: "Search index", how: "Checks the full-text search index against the memories. Repaired automatically (it's rebuilt from the memories).", certainty: "confirmed" },
+  note_links: { label: "Links in notes", how: "Links in your library notes that point to no note or file, or that match several notes with the same name (ambiguous). One summary; open Library → Links to see them all.", certainty: "confirmed" },
   similarity_vectors: { label: "Similarity vectors", how: "Every memory needs an up-to-date local similarity vector for search and suggestions. Missing or outdated ones are recomputed automatically.", certainty: "confirmed" },
 } as const;
 export type HealthCheck = keyof typeof HEALTH_CHECKS;
@@ -484,6 +485,34 @@ export class KnowledgeHealth {
         });
       }
       run("stale_project", inputs);
+    }
+
+    // --- links in library notes (one summary finding, never one per link)
+    if (want.has("note_links")) {
+      stop();
+      const lib = this.brain.library;
+      const unresolved = Number(this.db.value("SELECT COUNT(*) FROM document_links l JOIN documents d ON d.id = l.source_id WHERE d.user_id = ? AND d.status = 'active' AND l.status = 'unresolved'", [this.uid]) ?? 0);
+      const ambiguous = Number(this.db.value("SELECT COUNT(*) FROM document_links l JOIN documents d ON d.id = l.source_id WHERE d.user_id = ? AND d.status = 'active' AND l.status = 'ambiguous'", [this.uid]) ?? 0);
+      const inputs: Omit<FindingInput, "kind" | "category" | "algorithm">[] = [];
+      if (unresolved + ambiguous > 0) {
+        const ex = lib.unresolvedLinks(8);
+        inputs.push({
+          key: ["note_links"],
+          evidenceKey: [String(unresolved), String(ambiguous)],
+          title: `${unresolved + ambiguous} link${unresolved + ambiguous === 1 ? "" : "s"} in your notes ${unresolved + ambiguous === 1 ? "doesn't" : "don't"} lead to one note`,
+          description: `${unresolved} point to a note or file that doesn't exist${ambiguous ? `, ${ambiguous} match several notes with the same name` : ""}. MOTH never guesses which note you meant.`,
+          memory_ids: [],
+          project_ids: [],
+          evidence: ex.map((e) => ({ source_ref: `document:${e.source_id}`, note: `${e.source_title}: ${e.raw || e.target_text} (${e.status})` })),
+          evidence_status: "confirmed",
+          severity: "info",
+          confidence: 1,
+          suggested_action: "Create the missing notes, or fix the links (use a folder path to pick one of several notes)",
+          action: { type: "open_library", view: "links" },
+          system: true,
+        });
+      }
+      run("note_links", inputs);
     }
 
     // --- inconsistent preferences

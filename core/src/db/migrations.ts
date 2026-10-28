@@ -765,9 +765,11 @@ CREATE TABLE documents (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX idx_docs_folder ON documents(user_id, folder_id, status);
-CREATE INDEX idx_docs_title ON documents(user_id, title COLLATE NOCASE);
+CREATE INDEX idx_docs_title ON documents(title COLLATE NOCASE, status);
+CREATE INDEX idx_docs_srcpath ON documents(import_batch_id, source_path COLLATE NOCASE);
 CREATE INDEX idx_docs_batch ON documents(import_batch_id);
-CREATE INDEX idx_docs_hash ON documents(user_id, content_hash);
+CREATE INDEX idx_docs_hash ON documents(content_hash);
+CREATE INDEX idx_docs_imported ON documents(imported_hash);
 CREATE INDEX idx_docs_updated ON documents(user_id, status, updated_at DESC);
 
 CREATE TABLE document_tags (
@@ -863,7 +865,8 @@ CREATE TABLE attachments (
   import_batch_id TEXT,
   created_at TEXT NOT NULL
 );
-CREATE UNIQUE INDEX idx_attach_hash ON attachments(user_id, sha256);
+CREATE UNIQUE INDEX idx_attach_hash ON attachments(user_id, sha256, original_name COLLATE NOCASE);
+CREATE INDEX idx_attach_storage ON attachments(storage_path);
 CREATE INDEX idx_attach_name ON attachments(user_id, original_name COLLATE NOCASE);
 CREATE TABLE attachment_refs (
   attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,

@@ -93,6 +93,7 @@ export const DEFAULT_SETTINGS = {
   "updates.autoCheck": true,
   "updates.lastCheck": "",
   "updates.deferredVersion": "",
+  "updates.resumeImports": [] as string[],
   // v0.4.0 Agents: per-agent { enabled, background, everyHours, maxItems } overrides (defaults in agents.ts).
   "agents.config": {} as Record<string, { enabled?: boolean; background?: boolean; everyHours?: number; maxItems?: number }>,
   "appearance.sidebarCollapsed": false,

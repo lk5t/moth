@@ -37,10 +37,10 @@ export class ClientAccess {
     const ids = new Set<string>();
     for (const [k, v] of Object.entries(args ?? {})) {
       if (!ID_KEYS.has(k)) continue;
-      for (const x of Array.isArray(v) ? v : [v]) if (typeof x === "string" && x.startsWith("mem_")) ids.add(x);
+      for (const x of Array.isArray(v) ? v : [v]) if (typeof x === "string" && (x.startsWith("mem_") || x.startsWith("doc_"))) ids.add(x);
     }
     for (const id of ids) {
-      const pid = this.memProject(id);
+      const pid = id.startsWith("doc_") ? this.docProject(id) : this.memProject(id);
       if (pid) p.assert(this.subject, need, pid, `${tool} on a memory in a restricted project`);
     }
   }
@@ -52,9 +52,18 @@ export class ClientAccess {
     const pid = this.memProject(id);
     return !!pid && !this.brain.permissions.allowed(this.subject, "read_memories", pid);
   }
+  private docProject(id: string): string | null {
+    const key = `doc:${id}`;
+    if (!this.projectOf.has(key)) this.projectOf.set(key, (this.brain.db.value<string>("SELECT project_id FROM documents WHERE id = ?", [id]) ?? null) as string | null);
+    return this.projectOf.get(key)!;
+  }
   private denied(o: Row): boolean {
     const id = typeof o.id === "string" ? o.id : null;
     if (id?.startsWith("mem_")) return this.deniedMemory(id);
+    if (id?.startsWith("doc_")) {
+      const pid = this.docProject(id);
+      return !!pid && !this.brain.permissions.allowed(this.subject, "read_memories", pid);
+    }
     if (id?.startsWith("prj_")) return this.deniedProject(id);
     if (o.memory && typeof o.memory === "object" && typeof (o.memory as Row).id === "string" && ((o.memory as Row).id as string).startsWith("mem_")) return this.deniedMemory((o.memory as Row).id as string);
     if ("project_id" in o && this.deniedProject(o.project_id)) return true;

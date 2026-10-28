@@ -136,9 +136,23 @@ jobs:
         shell: bash
         run: .github/ci-run.sh "Rust compile/tests" cargo test --manifest-path src-tauri/Cargo.toml --release
 
-      - name: Build installer
+      - name: Build installer (signed updater artifacts when the signing key secret is set)
         shell: bash
-        run: .github/ci-run.sh "Installer build" npx tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            .github/ci-run.sh "Installer build" npx tauri build
+          else
+            echo "::warning title=Updater::TAURI_SIGNING_PRIVATE_KEY is not set: building without signed update files (in-app updates can't use this build)."
+            unset TAURI_SIGNING_PRIVATE_KEY
+            .github/ci-run.sh "Installer build" npx tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          fi
+
+      - name: Verify the update signature and write the update manifest
+        shell: bash
+        run: node .github/updater-manifest.mjs src-tauri/target/release/bundle/nsis "$(node -p "require('./src-tauri/tauri.conf.json').version")" "release-notes/v$(node -p "require('./src-tauri/tauri.conf.json').version").md" updater-out
 
       - name: Install on this clean runner and smoke-test
         shell: pwsh
@@ -235,4 +249,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           body_path: release-notes/v${{ steps.ver.outputs.v }}.md
           make_latest: true
-          files: src-tauri/target/release/bundle/nsis/*.exe
+          files: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.exe.sig
+            updater-out/latest.json

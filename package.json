@@ -1,6 +1,6 @@
 {
   "name": "moth",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "MOTH — a self-evolving second brain for Claude (Tauri 2 desktop app)",
   "scripts": {

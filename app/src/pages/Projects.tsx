@@ -111,7 +111,7 @@ function ProjectDialog({ open, onClose, onSaved, project }: { open: boolean; onC
   );
 }
 
-function ProjectDashboard({ id, onBack }: { id: string; onBack: () => void }) {
+export function ProjectDashboard({ id, onBack }: { id: string; onBack: () => void }) {
   const { select, go, toast } = useApp();
   const [editing, setEditing] = useState(false);
   const { data, error, reload } = useLive<any>("projects.get", { id });

@@ -2,7 +2,10 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Permissions for MOTH's main window and the Quick Capture window",
-  "windows": ["main", "capture"],
+  "windows": [
+    "main",
+    "capture"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",
@@ -19,6 +22,8 @@
     "autostart:allow-is-enabled",
     "opener:default",
     "opener:allow-reveal-item-in-dir",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

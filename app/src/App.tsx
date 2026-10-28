@@ -4,6 +4,7 @@ import { MemoryEditor } from "./components/MemoryEditor";
 import { MemoryPanel } from "./components/MemoryPanel";
 import { MothMark } from "./components/MothLogo";
 import { QuickCapture } from "./components/QuickCapture";
+import { UpdateNotice } from "./components/Updates";
 import { NAV, Sidebar, TitleBar, Toasts } from "./components/Shell";
 import { Button, Dialog } from "./components/ui";
 import { onChanges, rpc } from "./lib/api";
@@ -18,6 +19,7 @@ import { GuidePage } from "./pages/Guide";
 import { HealthPage } from "./pages/Health";
 import { DiscoveriesPage } from "./pages/Discoveries";
 import { AgentsPage } from "./pages/Agents";
+import { LibraryPage } from "./pages/Library";
 import { ActivityPage, TimelinePage } from "./pages/History";
 import { InboxPage } from "./pages/Inbox";
 import { MemoriesPage } from "./pages/Memories";
@@ -116,7 +118,7 @@ function Workspace({ firstMemory, onRestartFirstFlight }: { firstMemory?: string
       const typing = /input|textarea|select/i.test((e.target as HTMLElement)?.tagName ?? "");
       if (mod && e.key.toLowerCase() === "k") (e.preventDefault(), setPaletteOpen(true));
       else if (mod && e.key.toLowerCase() === "n") (e.preventDefault(), edit("new"));
-      else if (mod && /^[1-9]$/.test(e.key)) (e.preventDefault(), go(NAV[Number(e.key) - 1].page));
+      else if (mod && /^[1-9]$/.test(e.key) && NAV.some((n) => n.key === e.key)) (e.preventDefault(), go(NAV.find((n) => n.key === e.key)!.page));
       else if (mod && e.key === ",") (e.preventDefault(), go("settings"));
       else if (mod && e.key === "\\") (e.preventDefault(), app.setSidebarCollapsed(!app.sidebarCollapsed));
       else if (e.key === "Escape" && !typing && selected && !document.querySelector("[role=dialog]")) select(null);
@@ -205,6 +207,7 @@ function Workspace({ firstMemory, onRestartFirstFlight }: { firstMemory?: string
     health: HealthPage,
     discoveries: DiscoveriesPage,
     agents: AgentsPage,
+    library: LibraryPage,
   };
   const Page = pages[page];
   return (
@@ -216,6 +219,7 @@ function Workspace({ firstMemory, onRestartFirstFlight }: { firstMemory?: string
         </div>
       </main>
       <MemoryPanel />
+      <UpdateNotice />
       <CommandPalette />
       <MemoryEditor />
       <Dialog open={captureOpen} onClose={() => setCaptureOpen(false)} title="Quick Capture" width={520}>
