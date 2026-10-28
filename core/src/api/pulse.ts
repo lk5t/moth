@@ -132,3 +132,67 @@ export function timeline(brain: Brain, f: { project_id?: string; memory_type?: s
     sources: brain.db.all<Row>("SELECT DISTINCT source FROM memories WHERE user_id = ? ORDER BY source", [brain.store.userId]).map((r) => r.source),
   };
 }
+
+/**
+ * Pulse 2.0: the intelligence side of the Overview. Counts are plain SQL over stored records; feeds list stored
+ * findings, jobs and handoffs. Nothing is estimated and nothing is shown that isn't in the database.
+ */
+export function intelligencePulse(brain: Brain): Row {
+  const db = brain.db;
+  const uid = brain.store.userId;
+  const n = (sql: string, p: unknown[] = []) => Number(db.value(sql, p) ?? 0);
+  const week = new Date(Date.now() - 7 * 86_400_000).toISOString();
+  const HIGH = 0.75;
+  const active = "status IN ('new','viewed')";
+  const openItems = (kind: string) => n(`SELECT COUNT(*) FROM project_items i JOIN projects p ON p.id = i.project_id WHERE i.user_id = ? AND i.kind = ? AND i.status = 'open' AND p.archived = 0`, [uid, kind]);
+  const counts = {
+    active_projects: n("SELECT COUNT(*) FROM projects WHERE user_id = ? AND archived = 0 AND COALESCE(last_activity_at, updated_at) >= ?", [uid, week]),
+    projects: n("SELECT COUNT(*) FROM projects WHERE user_id = ? AND archived = 0", [uid]),
+    unresolved_decisions: openItems("unresolved_decision"),
+    open_blockers: openItems("blocker"),
+    pending_reviews: Number(brain.inbox.counts().pending),
+    high_confidence_discoveries: n(`SELECT COUNT(*) FROM findings WHERE user_id = ? AND kind = 'discovery' AND ${active} AND confidence >= ?`, [uid, HIGH]),
+    discoveries: n(`SELECT COUNT(*) FROM findings WHERE user_id = ? AND kind = 'discovery' AND ${active}`, [uid]),
+    awareness_items: n(`SELECT COUNT(*) FROM findings WHERE user_id = ? AND kind = 'awareness' AND ${active}`, [uid]),
+    health_confirmed: n(`SELECT COUNT(*) FROM findings WHERE user_id = ? AND kind = 'health' AND ${active} AND evidence_status = 'confirmed'`, [uid]),
+    health_possible: n(`SELECT COUNT(*) FROM findings WHERE user_id = ? AND kind = 'health' AND ${active} AND evidence_status = 'possible'`, [uid]),
+    agent_approvals: n("SELECT COUNT(*) FROM review_queue r JOIN jobs j ON j.id = r.job_id WHERE r.status = 'pending' AND j.owner LIKE 'agent:%'"),
+  };
+  const sev: Record<string, number> = { high: 0, medium: 1, low: 2, info: 3 };
+  const awareness = brain.findings
+    .list({ kind: "awareness", status: "active", limit: 200 })
+    .sort((a, b) => (sev[a.severity as string] ?? 4) - (sev[b.severity as string] ?? 4) || String(b.updated_at).localeCompare(String(a.updated_at)))
+    .slice(0, 6);
+  const discoveries = brain.findings
+    .list({ kind: "discovery", status: "active", limit: 200 })
+    .filter((f) => Number(f.confidence ?? 0) >= HIGH)
+    .sort((a, b) => Number(b.confidence) - Number(a.confidence))
+    .slice(0, 4);
+  const agentJobs = brain.jobs
+    .list({ limit: 40 })
+    .filter((j) => String(j.owner).startsWith("agent:"))
+    .slice(0, 6)
+    .map((j) => ({ id: j.id, title: j.title, owner: j.owner, status: j.status, created_at: j.created_at, finished_at: j.finished_at, summary: (j.result as Row | null)?.summary ?? null, error: j.status === "failed" || j.status === "interrupted" ? j.last_error : null }));
+  const projects = db.all<Row>("SELECT id, name, COALESCE(last_activity_at, updated_at) AS at FROM projects WHERE user_id = ? AND archived = 0 ORDER BY at DESC LIMIT 4", [uid]);
+  const continuity = projects.map((p) => {
+    let next: Row | null = null;
+    let handoff: Row | null = null;
+    try {
+      const r = brain.projectIntel.resume(p.id as string);
+      next = (r.next_step as Row | null) ?? null;
+      handoff = (r.latest_handoff as Row | null) ?? null;
+    } catch {
+      /* project removed meanwhile */
+    }
+    return {
+      project_id: p.id, name: p.name, last_activity_at: p.at,
+      next_step: next ? { text: next.text, why: next.why } : null,
+      handoff: handoff ? { id: handoff.id, summary: handoff.summary, client: handoff.client, updated_at: handoff.updated_at } : null,
+      unresolved: n("SELECT COUNT(*) FROM project_items WHERE project_id = ? AND kind = 'unresolved_decision' AND status = 'open'", [p.id]),
+      blockers: n("SELECT COUNT(*) FROM project_items WHERE project_id = ? AND kind = 'blocker' AND status = 'open'", [p.id]),
+    };
+  });
+  const repairs7d = n("SELECT COUNT(*) FROM activity_logs WHERE kind = 'health_repair' AND created_at >= ?", [week]);
+  const health = { ...brain.health.summary(), confirmed: counts.health_confirmed, possible: counts.health_possible, repairs_7d: repairs7d };
+  return { at: new Date().toISOString(), counts, feeds: { awareness, discoveries, agents: agentJobs, continuity, health: { last_scan: (health as Row).last_scan, confirmed: health.confirmed, possible: health.possible, repairs_7d: repairs7d, top: ((health as Row).checks as Row[]).filter((c) => Number(c.confirmed) + Number(c.possible) > 0).slice(0, 4) } } };
+}

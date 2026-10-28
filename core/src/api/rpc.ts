@@ -14,7 +14,7 @@ import { disconnectIntegration, googleAuthStatus, importFromGoogle, signOut, sta
 import {
   claudeCodeInstructions, clientStates, configureClaudeCode, configureClaudeDesktop, connectionStatus, diagnostics, removeClaudeDesktop, selfTest,
 } from "../connections.ts";
-import { pulse, timeline } from "./pulse.ts";
+import { intelligencePulse, pulse, timeline } from "./pulse.ts";
 import { VERSION } from "../mcp/server.ts";
 
 export interface Controller {
@@ -282,6 +282,7 @@ export function rpcMethods(c: Controller): Record<string, (p: any) => unknown> {
 
     // ---------------------------------------------------------------- v0.2.5: Pulse, Timeline, First Flight, Quick Capture
     pulse: () => pulse(b()),
+    "pulse.intelligence": () => intelligencePulse(b()),
     "notifications.since": (p: { after_id?: number } = {}) => {
       const br = b();
       const after = Number(p?.after_id ?? 0);
