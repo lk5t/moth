@@ -189,7 +189,7 @@ export class VaultImporter {
             pending.push({ rel, kind, size: st.size, mtime: st.mtimeMs, sha: sha(text), links: links.length });
           }
         } else {
-          pending.push({ rel, kind, size: st.size, mtime: st.mtimeMs, status: kind === "unsupported" ? "skipped" : "pending", detail: kind === "unsupported" ? "File type not supported" : null });
+          pending.push({ rel, kind, size: st.size, mtime: st.mtimeMs });
         }
         if (pending.length >= 500 || pendingLinks.length >= 5000) flush();
         if (Date.now() - lastProgress > 300) {
@@ -209,6 +209,36 @@ export class VaultImporter {
     return scan;
   }
 
+  /** Earlier imports of the same vault folder that are still in MOTH (newest first). */
+  private earlierImports(batchId: string, root: string): Row[] {
+    return this.db.all<Row>(
+      "SELECT id, root_folder_id FROM import_batches WHERE user_id = ? AND id <> ? AND source_root = ? COLLATE NOCASE AND status IN ('done','cancelled','paused','failed') ORDER BY created_at DESC LIMIT 20",
+      [this.uid, batchId, root],
+    );
+  }
+
+  /** Files already copied by an earlier import of the same vault: same place in the vault, same size, same
+   *  modification time, and the stored copy still exists. Re-importing skips them instead of copying them again. */
+  private markImportedAttachments(batchId: string, root: string, apply: boolean): number {
+    let total = 0;
+    for (const e of this.earlierImports(batchId, root)) {
+      const match = `FROM import_items p JOIN attachments a ON a.id = p.entity_id
+        WHERE p.batch_id = ? AND p.rel_path = i.rel_path AND p.kind = 'attachment' AND p.status IN ('done','duplicate')
+          AND p.size = i.size AND ROUND(p.mtime_ms) = ROUND(i.mtime_ms)`;
+      if (apply) {
+        total += Number(this.db.run(
+          `UPDATE import_items AS i SET status = 'duplicate', detail = 'Already imported earlier (same file)', entity_id = (SELECT p.entity_id ${match} LIMIT 1)
+             WHERE i.batch_id = ? AND i.kind = 'attachment' AND i.status = 'pending' AND EXISTS (SELECT 1 ${match})`,
+          [e.id, batchId, e.id],
+        ).changes ?? 0);
+      } else {
+        total += Number(this.db.value(`SELECT COUNT(*) FROM import_items i WHERE i.batch_id = ? AND i.kind = 'attachment' AND i.status = 'pending' AND EXISTS (SELECT 1 ${match})`, [batchId, e.id]) ?? 0);
+        if (total) break; // preview: the newest earlier import is enough for the estimate
+      }
+    }
+    return total;
+  }
+
   /** Preview numbers, computed from the manifest with SQL (no file list in memory). */
   private summarize(batchId: string, root: string, skippedDirs: string[], ms: number): Row {
     const n = (sql: string, p: unknown[] = [batchId]) => Number(this.db.value(sql, p) ?? 0);
@@ -216,6 +246,8 @@ export class VaultImporter {
     const noteBytes = n("SELECT COALESCE(SUM(size),0) FROM import_items WHERE batch_id = ? AND kind = 'note' AND status = 'pending'");
     const atts = n("SELECT COUNT(*) FROM import_items WHERE batch_id = ? AND kind = 'attachment'");
     const attBytes = n("SELECT COALESCE(SUM(size),0) FROM import_items WHERE batch_id = ? AND kind = 'attachment'");
+    // Files an earlier import of this vault already copied (they are reused, not copied again).
+    const attExisting = this.markImportedAttachments(batchId, root, false);
     const folders = n("SELECT COUNT(*) FROM import_items WHERE batch_id = ? AND kind = 'folder' AND status = 'done'");
     const unsupported = this.db.all<Row>(
       `SELECT lower(CASE WHEN instr(rel_path, '.') > 0 THEN replace(rel_path, rtrim(rel_path, replace(rel_path, '.', '')), '.') ELSE '(no extension)' END) AS ext, COUNT(*) AS n, SUM(size) AS bytes
@@ -257,13 +289,13 @@ export class VaultImporter {
     );
     const disk = this.diskSpace();
     // Destination estimate: note text roughly twice (stored + search index) plus attachments copied once each.
-    const needed = Math.round(noteBytes * 2.2 + attBytes);
+    const needed = Math.round(noteBytes * 2.2 + attBytes * (atts ? Math.max(0, atts - attExisting) / atts : 0));
     return {
       root, vault_name: path.basename(root), notes, note_bytes: noteBytes, folders, attachments: atts, attachment_bytes: attBytes,
       total_files: n("SELECT COUNT(*) FROM import_items WHERE batch_id = ? AND kind <> 'folder'"), total_bytes: n("SELECT COALESCE(SUM(size),0) FROM import_items WHERE batch_id = ?"),
       unsupported: unsupported.map((u) => ({ ext: u.ext, files: Number(u.n), bytes: Number(u.bytes) })), unsupported_files: unsupported.reduce((s, u) => s + Number(u.n), 0),
       failed, links, unresolved_links: unresolved, unresolved_examples: unresolvedRows.slice(0, 25).map((r) => ({ target: r.target, count: Number(r.n) })),
-      duplicates_existing: dupExisting, same_text_elsewhere: sameTextElsewhere, duplicates_within: dupWithin, same_name_notes: sameTitles.map((r) => ({ name: r.name, count: Number(r.n) })),
+      duplicates_existing: dupExisting, attachments_existing: attExisting, same_text_elsewhere: sameTextElsewhere, duplicates_within: dupWithin, same_name_notes: sameTitles.map((r) => ({ name: r.name, count: Number(r.n) })),
       largest_attachments: largest, file_types: types, skipped_folders: skippedDirs.slice(0, 100),
       disk: { free_bytes: disk, needed_bytes: needed, enough: disk === null ? null : disk > needed * 1.1 + 200 * 1024 * 1024 },
       scan_ms: ms,
@@ -301,6 +333,7 @@ export class VaultImporter {
         for (const ext of options.excludeExtensions ?? []) this.db.run("UPDATE import_items SET status = 'excluded', detail = 'File type left out (your choice)' WHERE batch_id = ? AND kind = 'attachment' AND status = 'pending' AND lower(rel_path) LIKE ?", [batchId, `%${ext}`]);
         if (options.maxAttachmentBytes) this.db.run("UPDATE import_items SET status = 'excluded', detail = 'Larger than your limit' WHERE batch_id = ? AND kind = 'attachment' AND status = 'pending' AND size > ?", [batchId, options.maxAttachmentBytes]);
         for (const p of options.excludePaths ?? []) this.db.run("UPDATE import_items SET status = 'excluded', detail = 'Left out (your choice)' WHERE batch_id = ? AND rel_path = ? AND status = 'pending'", [batchId, p]);
+        if (options.duplicates !== "separate") this.markImportedAttachments(batchId, String(b.source_root), true);
       });
       const needed = Number(this.db.value("SELECT COALESCE(SUM(CASE kind WHEN 'note' THEN size * 2.2 ELSE size END), 0) FROM import_items WHERE batch_id = ? AND status = 'pending'", [batchId]) ?? 0);
       const free = this.diskSpace();
@@ -350,6 +383,16 @@ export class VaultImporter {
 
     // Root folder in the library (once).
     let rootFolder = (b.root_folder_id as string) ?? null;
+    if (!rootFolder && !opts.folderName && opts.duplicates !== "separate") {
+      // Importing the same vault again: add to the folder of the earlier import instead of making a second one.
+      for (const e of this.earlierImports(batchId, root)) {
+        if (e.root_folder_id && this.db.value("SELECT 1 FROM folders WHERE id = ? AND user_id = ?", [e.root_folder_id, this.uid])) {
+          rootFolder = String(e.root_folder_id);
+          this.setBatch(batchId, { root_folder_id: rootFolder });
+          break;
+        }
+      }
+    }
     if (!rootFolder) {
       const base = (opts.folderName ?? path.basename(root)).replace(/[\\/:*?"<>|]/g, "-").slice(0, 120) || "Vault";
       let name = base;
@@ -478,12 +521,18 @@ export class VaultImporter {
         await yieldNow();
       }
       if (after === "~done") {
-        // Links in notes you already had may now find the imported notes.
-        const titles = this.db.all<Row>(
-          `SELECT DISTINCT l.target_text FROM document_links l JOIN documents s ON s.id = l.source_id WHERE s.user_id = ? AND (s.import_batch_id IS NULL OR s.import_batch_id <> ?) AND l.status IN ('unresolved','ambiguous') LIMIT 20000`,
+        // Links in notes you already had (including notes from an earlier import of this vault) may now find the
+        // imported notes or files: those notes are indexed again (same resolution rules as during the import).
+        const others = this.db.all<Row>(
+          `SELECT DISTINCT l.source_id AS id FROM document_links l JOIN documents s ON s.id = l.source_id WHERE s.user_id = ? AND (s.import_batch_id IS NULL OR s.import_batch_id <> ?) AND l.created_by = 'parser' AND l.status IN ('unresolved','ambiguous') LIMIT 20000`,
           [this.uid, batchId],
         );
-        if (titles.length) lib.reresolveFor(titles.map((t) => String(t.target_text)));
+        for (let i = 0; i < others.length; i += DB_BATCH) {
+          this.db.tx(() => {
+            for (const o of others.slice(i, i + DB_BATCH)) lib.indexLinks(String(o.id));
+          });
+          await yieldNow();
+        }
         const result = this.result(batchId, Date.now());
         this.setBatch(batchId, { status: "done", finished_at: nowIso(), result, progress: { phase: "done", at: nowIso() } });
         this.db.run("INSERT INTO db_changes(entity, entity_id, op) VALUES ('document', ?, 'update')", [batchId]);

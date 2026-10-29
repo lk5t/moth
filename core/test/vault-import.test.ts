@@ -27,7 +27,7 @@ export function makeVault(root: string) {
   write(root, "Attachments/logo.png", png);
   write(root, "Attachments/logo copy.png", png); // identical file under another name
   write(root, "Files/spec.pdf", "%PDF-1.4 fake pdf for the test");
-  write(root, "Files/tool.exe", "MZ not supported");
+  write(root, "Files/tool.exe", "MZ any file type is kept");
   write(root, ".obsidian/workspace.json", '{"main":{}}');
   write(root, ".obsidian/plugins/x/main.js", "console.log('plugin')");
   fs.mkdirSync(path.join(root, "Empty folder"), { recursive: true });
@@ -85,9 +85,8 @@ test("Obsidian import: scan preview from real files, import, links, attachments;
   assert.equal(scanned.status, "scanned", String(scanned.error));
   const s = scanned.scan as any;
   assert.equal(s.notes, 7);
-  assert.equal(s.attachments, 3);
-  assert.equal(s.unsupported_files, 1);
-  assert.deepEqual(s.unsupported.map((u: any) => u.ext), [".exe"]);
+  assert.equal(s.attachments, 4, "every non-note file is kept, whatever its type");
+  assert.equal(s.unsupported_files, 0);
   assert.ok(s.skipped_folders.includes(".obsidian"), "Obsidian settings and plugins are left out");
   assert.equal(s.unresolved_links, 1, JSON.stringify(s.unresolved_examples));
   assert.equal(s.unresolved_examples[0].target, "does not exist");
@@ -99,7 +98,7 @@ test("Obsidian import: scan preview from real files, import, links, attachments;
   assert.equal(done.status, "done", String(done.error));
   const r = done.result as any;
   assert.equal(r.notes, 7);
-  assert.equal(r.attachments, 3);
+  assert.equal(r.attachments, 4);
   assert.equal(r.errors, 0);
   assert.ok(r.duration_ms >= 0);
   // Folders kept (inside a folder named after the vault), notes are independent editable copies.
@@ -120,7 +119,7 @@ test("Obsidian import: scan preview from real files, import, links, attachments;
   assert.equal(arenaDoc.outgoing.find((o: any) => o.target_text === "Brainstorm").target_title, "Ideas", "aliases resolve");
   // Identical files are stored once, under both names.
   const atts = L.attachments().items;
-  assert.equal(atts.length, 3);
+  assert.equal(atts.length, 4);
   assert.equal(new Set(atts.filter((a: any) => /logo/.test(a.original_name)).map((a: any) => a.storage_path)).size, 1);
   const { file } = L.attachmentFile(atts.find((a: any) => a.original_name === "logo.png")!.id as string);
   assert.deepEqual(fs.readFileSync(file), fs.readFileSync(path.join(vault, "Attachments/logo.png")));
@@ -146,7 +145,8 @@ test("Obsidian import: a repeated import skips confirmed duplicates; identical t
   assert.equal((sc.scan as any).duplicates_existing, 7);
   b.importer.start(again.id as string, {});
   const d = await until(b, again.id as string, ["done"]);
-  assert.equal((d.result as any).duplicates, 7);
+  assert.equal((d.result as any).duplicates, 11, "7 notes and 4 files already imported");
+  assert.equal((d.result as any).folders, 0, "added to the earlier import's folder, no second folder");
   assert.equal(Number(b.db.value("SELECT COUNT(*) FROM documents")), docs, "nothing imported twice");
   // "Import separately" makes copies on request.
   const third = b.importer.startScan(vault);
@@ -304,5 +304,71 @@ test("Updating: imports are paused before an update and resume after the restart
   for (let i = 0; i < 20 && b.importer.batch(imp.id as string).status !== "done"; i++) await b.jobs.tick();
   assert.equal(b.importer.batch(imp.id as string).status, "done");
   assert.equal(Number(b.db.value("SELECT COUNT(*) FROM documents")), 250);
+  b.close();
+});
+
+test("Re-importing a vault after more file types are supported: only the missing files are copied, into the same folder; undo removes only them", async () => {
+  const vault = path.join(tmpDir(), "Game Vault");
+  makeVault(vault);
+  const model = crypto.randomBytes(30000);
+  write(vault, "Models/Ship/ship.glb", model);
+  write(vault, "Models/Ship/ship.mtl", "newmtl hull");
+  write(vault, "Models/Ship/ship.fbx", crypto.randomBytes(2000)); // not linked from any note
+  write(vault, "Models/Ship.md", "# Ship\nThe model: ![[ship.glb]] and materials [[ship.mtl]]");
+  const before = manifest(vault);
+  const b = openBrain();
+  b.importer.registerJobs();
+  const L = b.library;
+  // First import without the 3D files (like v0.5.0, which skipped those types).
+  const first = b.importer.startScan(vault);
+  await until(b, first.id as string, ["scanned"]);
+  b.importer.start(first.id as string, { excludeExtensions: [".glb", ".mtl", ".fbx"] });
+  const f = await until(b, first.id as string, ["done"]);
+  assert.equal((f.result as any).attachments, 4);
+  const ship = L.list({ q: "The model" }).items[0];
+  assert.ok((L.backlinks(ship.id as string) as any).unresolved.some((u: any) => u.target_text === "ship.glb"), "missing before");
+  const rootFolders = () => L.tree().filter((x) => x.parent_id === null).length;
+  assert.equal(rootFolders(), 1);
+  const stored = () => Number(b.db.value("SELECT COUNT(*) FROM attachments"));
+  const storedBefore = stored();
+  const docs = Number(b.db.value("SELECT COUNT(*) FROM documents"));
+  const firstAttachmentIds = b.db.all<any>("SELECT id FROM attachments ORDER BY id").map((r) => r.id);
+
+  // Second import of the same vault.
+  const again = b.importer.startScan(vault);
+  const sc = (await until(b, again.id as string, ["scanned"])).scan as any;
+  assert.equal(sc.duplicates_existing, 8);
+  assert.equal(sc.attachments_existing, 4, "files copied the first time are recognised");
+  assert.ok(sc.disk.needed_bytes < 42000 + 5000, `only the missing files count towards the space needed (${sc.disk.needed_bytes})`);
+  let copies = 0;
+  const orig = (b.importer as any).copyAttachment.bind(b.importer);
+  (b.importer as any).copyAttachment = (...a: unknown[]) => (copies++, orig(...a));
+  b.importer.start(again.id as string, {});
+  const d = await until(b, again.id as string, ["done"]);
+  const r = d.result as any;
+  assert.equal(copies, 3, "only the three new files were read and copied");
+  assert.equal(r.attachments, 3);
+  assert.equal(r.notes, 0);
+  assert.equal(r.duplicates, 12);
+  assert.equal(r.errors, 0);
+  assert.equal(rootFolders(), 1, "same folder as the first import");
+  assert.equal(stored(), storedBefore + 3);
+  assert.equal(Number(b.db.value("SELECT COUNT(*) FROM documents")), docs, "no note imported twice");
+  const glb = L.attachments().items.find((a: any) => a.original_name === "ship.glb")!;
+  assert.deepEqual(fs.readFileSync(L.attachmentFile(glb.id as string).file), model);
+  const links = L.backlinks(ship.id as string) as any;
+  assert.equal(links.outgoing.find((o: any) => o.target_text === "ship.glb")?.target_kind, "attachment", "the earlier note's embed now finds the model");
+  assert.equal(links.outgoing.find((o: any) => o.target_text === "ship.mtl")?.target_kind, "attachment");
+
+  // Undoing the second import removes only what it added, and keeps files that notes use.
+  const u = b.importer.undo(again.id as string) as any;
+  assert.equal(u.removed_attachments, 1, "the unlinked .fbx is removed; the model and material used by the Ship note stay");
+  assert.equal(u.removed_notes, 0);
+  assert.equal(stored(), storedBefore + 2);
+  const left = b.db.all<any>("SELECT id FROM attachments ORDER BY id").map((x) => x.id);
+  assert.ok(firstAttachmentIds.every((id: string) => left.includes(id)), "nothing from the first import was removed");
+  assert.equal(rootFolders(), 1, "the first import's folder stays");
+  assert.equal(Number(b.db.value("SELECT COUNT(*) FROM documents WHERE status = 'active'")), docs);
+  assert.deepEqual(manifest(vault), before, "source vault unchanged");
   b.close();
 });

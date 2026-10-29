@@ -179,14 +179,14 @@ export function wordCount(text: string): number {
 }
 
 const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".avif"]);
-const ATTACH_EXT = new Set([...IMAGE_EXT, ".pdf", ".mp3", ".wav", ".m4a", ".ogg", ".flac", ".mp4", ".webm", ".mov", ".mkv", ".csv", ".txt", ".json", ".zip", ".docx", ".xlsx", ".pptx", ".canvas", ".excalidraw"]);
 export const NOTE_EXT = new Set([".md", ".markdown"]);
 
-export function fileKind(name: string): "note" | "attachment" | "unsupported" {
+/** Markdown files are notes; every other file is kept as an attachment (stored as-is, whatever its type: 3D models,
+ *  textures, scripts...). MOTH previews images, PDF, audio, video and text; other types are stored and can be
+ *  opened or saved from the Files page. */
+export function fileKind(name: string): "note" | "attachment" {
   const ext = name.slice(name.lastIndexOf(".")).toLowerCase();
-  if (NOTE_EXT.has(ext)) return "note";
-  if (ATTACH_EXT.has(ext)) return "attachment";
-  return "unsupported";
+  return NOTE_EXT.has(ext) ? "note" : "attachment";
 }
 
 export function mediaType(name: string): string {
@@ -196,6 +196,8 @@ export function mediaType(name: string): string {
     pdf: "application/pdf", mp3: "audio/mpeg", wav: "audio/wav", m4a: "audio/mp4", ogg: "audio/ogg", flac: "audio/flac", mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime", mkv: "video/x-matroska",
     csv: "text/csv", txt: "text/plain", json: "application/json", zip: "application/zip", canvas: "application/json", excalidraw: "application/json",
     docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    glb: "model/gltf-binary", gltf: "model/gltf+json", obj: "model/obj", mtl: "model/mtl", stl: "model/stl", fbx: "application/octet-stream", dae: "model/vnd.collada+xml",
+    hdr: "image/vnd.radiance", html: "text/html", htm: "text/html", lua: "text/plain", luau: "text/plain", py: "text/plain",
   };
   return map[ext] ?? "application/octet-stream";
 }

@@ -51,12 +51,12 @@ read or change.
 
 Library → *Import Obsidian vault*. It's a **one-time copy**: MOTH only reads the vault (nothing is created, changed,
 moved or deleted in it, and no tracking files are written). Notes, folders, tags, frontmatter, aliases, links and
-attachments come over; `.obsidian`, `.trash` and `.git` are left out; unsupported file types are listed, not
-imported.
+every other file (images, PDFs, 3D models, textures, scripts… any type) come over; `.obsidian`, `.trash` and `.git`
+are left out. MOTH previews images, PDFs, audio, video and text; other files are stored and listed under Files.
 
 1. Choose the folder. MOTH scans it in the background and shows real numbers: notes, folders, attachments, total
-   size, links, links that point nowhere, notes with the same name, unsupported files, and whether there's enough
-   disk space.
+   size, links, links that point nowhere, notes with the same name, files already imported, and whether there's
+   enough disk space.
 2. Choose options (keep folders, copy attachments, leave out big files or file types).
 3. Import. Progress shows files and bytes actually done. You can keep working, pause, resume or cancel. Quitting is
    safe: the import continues where it stopped (each file's outcome is recorded; nothing is imported twice).
@@ -68,8 +68,9 @@ is never loaded at once; attachments are streamed in 1 MB chunks) and work in ba
 Measured: 50,000 notes + 5 GB of attachments (see `docs/benchmarks/`); larger vaults are bounded by disk space and
 time, but sizes beyond what's listed there haven't been tested.
 
-**Re-importing / undo:** importing the same vault again skips notes already imported (same file, same content);
-identical text in different notes is never merged. *Import history → Undo* removes what an import added but keeps
+**Re-importing / undo:** importing the same vault again skips notes already imported (same file, same content) and
+reuses files already copied (same file, same size and date), and adds anything new to the same folder; identical
+text in different notes is never merged. *Import history → Undo* removes what an import added but keeps
 notes you edited, notes your own notes link to and notes with links you added; files are removed only when no note
 uses them.
 

@@ -405,3 +405,13 @@ On restore, tabs whose record no longer exists are dropped with a notice (`works
   only after that, and publishes installer, signature and manifest together.
 - Not verified yet: an end-to-end in-place update from one installed signed version to the next (needs two published
   signed versions; the first possible test is v0.5.0 → v0.5.1).
+
+### v0.5.1 — every file type, re-import adds what's missing
+- Every non-Markdown file in a vault is imported as an attachment, whatever its type (v0.5.0 skipped types it couldn't
+  preview, e.g. 3D models). Served with `nosniff`, a sandbox CSP and `attachment` disposition unless it's a previewable
+  type, as before.
+- Re-importing the same vault folder (same `source_root`): files an earlier import copied are recognised from its
+  manifest (same vault path, size and modification time, stored copy still present) and marked `duplicate` instead of
+  being read and copied again; new files go into the earlier import's root folder; notes are matched as before (path +
+  content). After the import, notes outside the import that have unresolved or ambiguous links are indexed again, so
+  their links find the new notes **and files**. Undo of the second import removes only files it added that no note uses.
