@@ -415,3 +415,28 @@ On restore, tabs whose record no longer exists are dropped with a notice (`works
   being read and copied again; new files go into the earlier import's root folder; notes are matched as before (path +
   content). After the import, notes outside the import that have unresolved or ambiguous links are indexed again, so
   their links find the new notes **and files**. Undo of the second import removes only files it added that no note uses.
+
+### v0.5.2 — The Mind: neural layout (fixes the dense ball)
+- **Why big vaults became a ball:** notes had no group, so all of them were pulled to one centre; index notes that
+  link to hundreds of notes pulled each of them hard (link strength only looked at the smaller end's degree); uniform
+  long-range repulsion turned the result into a disk. Rendering every note as an identical square and drawing every
+  link at the same opacity made it unreadable.
+- **Groups:** `graph.get` gives every node a `group` (memories: their project; notes: the top folder inside the
+  imported vault, or the top-level Library folder) and returns `groups` (real projects and folders). Layout only.
+- **Layout:** a small force layout of the groups (discs sized by member count, pulled together by the real number of
+  links between them) gives each group an anchor; nodes are pulled gently to their anchor. Link strength
+  `≈ linkForce·3/√(deg a·deg b)` (hubs pull weakly), links between groups ×0.15, local repulsion (`distanceMax`),
+  collision radius `r + 4` (hubs +3). New layouts settle up to 0.25 s before the first frame. Positions saved by an
+  older layout are laid out again once (`LAYOUT_VERSION`, stored per browser); pinned nodes keep their place.
+- **Level of detail:** zoomed out, links between groups are drawn as one bundle per pair (the ~160 strongest; width
+  from the real count) and fade out as individual links fade in; with thousands of links on screen a stable subset is
+  drawn until you zoom in; link opacity adapts to zoom and to the number of links on screen; links of hub nodes are
+  fainter unless focused; nodes, links, glows and labels outside the viewport are skipped. Labels (cluster names
+  first, then focus/selection/highlight, then by size) are placed in screen space without overlapping.
+- **Neurons:** circles; memories lavender (brightness from importance, project hubs/starred brighter), notes cool
+  blue (index notes brighter); size from real connections (log scale) and importance. Pathways are gentle stable
+  curves. Animations: activity pulses along real links of nodes changed in the last 14 days (none if nothing changed),
+  a wave along the hovered node's links (after a short dwell), a ripple on selection; all off in Minimal motion /
+  reduced motion; drawn on the light layer only.
+- **Engine fix:** note degrees for the graph were a correlated subquery per note with an `OR` (no index): 3.4 s for
+  848 notes / 21k links, 2 min 28 s for 3,000 notes. Now counted in one pass over the links: 0.13 s / 0.53 s.

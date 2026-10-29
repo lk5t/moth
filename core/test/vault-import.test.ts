@@ -372,3 +372,57 @@ test("Re-importing a vault after more file types are supported: only the missing
   assert.deepEqual(manifest(vault), before, "source vault unchanged");
   b.close();
 });
+
+test("The Mind groups imported notes by their top folder in the vault (real folders, layout only)", async () => {
+  const vault = path.join(tmpDir(), "Group Vault");
+  makeVault(vault);
+  const b = openBrain();
+  b.importer.registerJobs();
+  const imp = b.importer.startScan(vault);
+  await until(b, imp.id as string, ["scanned"]);
+  b.importer.start(imp.id as string, {});
+  await until(b, imp.id as string, ["done"]);
+  const g = b.graph({}) as any;
+  const byTitle = new Map<string, any>(g.nodes.filter((n: any) => n.kind === "document").map((n: any) => [n.title, n]));
+  const name = (id: string) => g.groups.find((x: any) => x.id === id)?.name;
+  assert.equal(name(byTitle.get("Arena").group), "Projects");
+  assert.equal(name(byTitle.get("Été ☀️").group), "Journal", "nested folders belong to their top folder in the vault");
+  assert.equal(name(byTitle.get("Home").group), "Group Vault", "notes at the vault root form the vault's own group");
+  assert.ok(g.groups.every((x: any) => x.kind === "project" || x.kind === "folder"));
+  // Memories keep their project as group.
+  const p = b.store.createProject({ name: "P" }, { actor: "user", reason: "t" } as any);
+  const m = b.store.createMemory({ title: "In P", content: "x", category: "fact", project_id: p.id } as any, { actor: "user", reason: "t" } as any);
+  const g2 = b.graph({}) as any;
+  assert.equal(g2.nodes.find((n: any) => n.id === m.id).group, p.id);
+  assert.ok(g2.groups.some((x: any) => x.id === p.id && x.kind === "project"));
+  b.close();
+});
+
+test("The Mind loads a big vault quickly: note link counts are computed in one pass (was minutes for 3,000 notes)", async () => {
+  const vault = path.join(tmpDir(), "Big Vault");
+  const N = 1500;
+  for (let i = 0; i < N; i++) {
+    const links = Array.from({ length: 10 }, (_, k) => `[[Note ${(i * 7 + k * 13 + 1) % N}]]`).join(" ");
+    write(vault, `F${i % 30}/Note ${i}.md`, `# Note ${i}\n${links}`);
+  }
+  write(vault, "INDEX.md", Array.from({ length: N }, (_, i) => `[[Note ${i}]]`).join("\n"));
+  const b = openBrain();
+  b.importer.registerJobs();
+  const imp = b.importer.startScan(vault);
+  await until(b, imp.id as string, ["scanned"], 20000);
+  b.importer.start(imp.id as string, {});
+  await until(b, imp.id as string, ["done"], 20000);
+  const t0 = performance.now();
+  const g = b.graph({}) as any;
+  const ms = performance.now() - t0;
+  assert.ok(ms < 1500, `graph() took ${Math.round(ms)} ms`);
+  const docs = g.nodes.filter((n: any) => n.kind === "document");
+  assert.equal(docs.length, N + 1);
+  // Degrees are the real number of resolved links touching each note.
+  const index = docs.find((n: any) => n.title === "INDEX");
+  assert.equal(index.degree, N);
+  const real = Number(b.db.value("SELECT COUNT(*) FROM document_links l JOIN documents d ON d.id = l.source_id WHERE l.status = 'resolved' AND l.target_kind = 'document' AND (l.source_id = ? OR l.target_id = ?) AND l.source_id <> l.target_id", [docs[5].id, docs[5].id]));
+  assert.equal(docs[5].degree, real);
+  assert.equal(docs[0].id, index.id, "most connected notes come first (they're kept when the note cap applies)");
+  b.close();
+});

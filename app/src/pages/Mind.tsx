@@ -36,7 +36,7 @@ export function MindPage() {
   const [settings, update] = useGraphSettings();
   const [mode, setMode] = useState<"global" | "local">(params.focus ? "local" : "global");
   const [center, setCenter] = useState<string | null>(params.focus ?? null);
-  const [data, setData] = useState<{ nodes: GraphNodeData[]; links: any[]; projects: any[] } | null>(null);
+  const [data, setData] = useState<{ nodes: GraphNodeData[]; links: any[]; projects: any[]; groups?: { id: string; name: string; kind: string }[] } | null>(null);
   const [panel, setPanel] = useState(false);
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState<Set<string> | null>(null);
@@ -151,10 +151,12 @@ export function MindPage() {
   }, [query]);
 
   const projectColors = useMemo(() => new Map((data?.projects ?? []).map((p, i) => [p.id, PROJECT_PALETTE[i % PROJECT_PALETTE.length]])), [data?.projects]);
-  // Cluster names come from real projects; stable identity so the graph doesn't redraw for nothing.
-  const clusterKey = JSON.stringify((data?.projects ?? []).map((p: any) => [p.id, p.name]));
+  // Cluster names come from real projects and, for notes, the real folders they live in; stable identity so the
+  // graph doesn't redraw for nothing.
+  const groupList: any[] = (data as any)?.groups ?? data?.projects ?? [];
+  const clusterKey = JSON.stringify(groupList.map((p: any) => [p.id, p.name]));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const clusterNames = useMemo(() => (data?.projects ?? []).map((p: any) => ({ id: p.id as string, name: p.name as string })), [clusterKey]);
+  const clusterNames = useMemo(() => groupList.map((p: any) => ({ id: p.id as string, name: p.name as string })), [clusterKey]);
   const savePositions = useMemo(() => debounce((items: any[]) => void rpc("graph.positions", { items }), 800), []);
   const onPositions = (items: { id: string; x: number; y: number; pinned?: boolean }[]) => {
     if (items.length === 1 && items[0].pinned !== undefined) void rpc("graph.positions", { items });
@@ -518,7 +520,7 @@ function SettingsPanel({ s, update, projects, tags, onClose, onMeasure }: { s: F
               <span>Moving: <b className="text-ink">{result.pan.fps} fps</b></span>
               <span>Zooming: <b className="text-ink">{result.zoom.fps} fps</b></span>
               <span>Hovering: <b className="text-ink">{result.hover.fps} fps</b></span>
-              <span className="text-ink-3">{result.nodes.toLocaleString()} memories · 60 fps is perfectly smooth, 30+ feels fine.</span>
+              <span className="text-ink-3">{result.nodes.toLocaleString()} memories and notes · 60 fps is perfectly smooth, 30+ feels fine.</span>
             </div>
           ) : null}
           {measureErr ? <span className="text-[12px] text-danger">{measureErr}</span> : null}

@@ -22,6 +22,23 @@
 //    and eased, so a cluster that grows or moves transitions smoothly. Clicking a name focuses the cluster.
 //  - Camera: eased wheel zoom anchored at the pointer, eased focus/fit, and any user gesture cancels an animation
 //    in progress so the view never fights the user.
+//
+// v0.5.2 "Neural": fixes the dense ball that big vaults produced.
+//  - Cause: notes had no group (everything was pulled to one centre), index notes linking to hundreds of notes pulled
+//    everything onto themselves (link strength ignored hub degree), and uniform repulsion turned that into a disk.
+//  - Layout: every node has a real group (its project, or for notes the top folder in the vault). Group anchors come
+//    from a small layout of the groups themselves (sized by members, pulled together by their real cross-links), so
+//    related regions sit near each other. Link strength is normalised by both ends' degree (hubs pull weakly),
+//    links between groups pull less, repulsion is local, collisions keep a minimum spacing. Old saved positions
+//    from the previous layout are laid out again once (LAYOUT_VERSION); afterwards positions are stable and saved.
+//  - Level of detail: zoomed out, links between groups are drawn as one bundle per pair of groups (width from the
+//    real number of links); zooming in fades the individual links in and the bundles out. Link opacity adapts to
+//    zoom and to how many links are on screen; links of hub notes are fainter unless focused. Everything outside
+//    the viewport is skipped. Labels never overlap (screen-space placement by priority).
+//  - Neurons: circles with a soft glow, lavender for memories, cool blue for notes, size from real connections
+//    and importance. Restrained life: activity-driven light pulses along real connections of recently changed
+//    memories and notes, a wave along the hovered neuron's connections and a ripple on selection; none of it in
+//    Minimal motion / reduced motion.
 import { drag as d3drag } from "d3-drag";
 import { forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY, type Simulation, type SimulationLinkDatum, type SimulationNodeDatum } from "d3-force";
 import { quadtree, type Quadtree } from "d3-quadtree";
@@ -48,8 +65,10 @@ export interface GraphNodeData {
   /** User-pinned ("starred") memory: a core memory that breathes softly. */
   starred?: boolean;
   memory_type?: string;
-  /** "document" for notes from the Knowledge Library (drawn as small rounded squares); memories otherwise. */
+  /** "document" for notes from the Knowledge Library (cool blue neurons); memories otherwise. */
   kind?: string;
+  /** Layout group: the memory's project, or for a note the top folder it lives in (real data only). */
+  group?: string | null;
 }
 
 export interface GraphLinkData {
@@ -88,6 +107,10 @@ interface SimNode extends SimulationNodeDatum, Omit<GraphNodeData, "x" | "y"> {
   pulseAt: number; // last real update pulse
   phase: number; // ambient shimmer phase
   core: boolean; // breathes (starred, project hub or very important)
+  group: string | null;
+  deg: number; // connections in this view
+  hub: boolean; // one of the most connected nodes in this view (e.g. an index note)
+  active: boolean; // changed recently (drives the occasional activity pulse)
 }
 
 interface ClusterState {
@@ -108,7 +131,42 @@ interface SimLink extends SimulationLinkDatum<SimNode> {
   strength: number;
   hi: number;
   bornAt: number; // reveal + pulse for new relationships
+  cross: boolean; // connects two different groups
+  hubby: boolean; // touches a hub node
+  curve: number; // signed bend (organic pathways), stable per link
+  lod: number; // stable 0..1 rank for progressive detail
 }
+interface Pulse {
+  from: SimNode;
+  to: SimNode;
+  curve: number;
+  start: number;
+  dur: number;
+  blue: boolean;
+}
+
+/** Bump when the layout algorithm changes: saved positions from an older layout are laid out again once. */
+const LAYOUT_VERSION = "neural-1";
+const LAYOUT_KEY = "moth.mind.layout";
+const layoutIsCurrent = () => {
+  try {
+    return localStorage.getItem(LAYOUT_KEY) === LAYOUT_VERSION;
+  } catch {
+    return true; // storage unavailable: keep saved positions rather than re-laying out on every load
+  }
+};
+const markLayoutCurrent = () => {
+  try {
+    localStorage.setItem(LAYOUT_KEY, LAYOUT_VERSION);
+  } catch {
+    /* ignore */
+  }
+};
+const smooth01 = (x: number) => {
+  const u = Math.max(0, Math.min(1, x));
+  return u * u * (3 - 2 * u);
+};
+const RECENT_MS = 14 * 86_400_000;
 
 export interface PhaseResult {
   fps: number;
@@ -171,14 +229,17 @@ interface Props {
 }
 
 const BG = ATMOSPHERE_BASE;
-const NODE = "#BDBDC8";
-const NODE_BRIGHT = "#EEEDF4";
-const NODE_FAINT = "#8F8F9E";
-const NODE_HUB = "#D9D3F5";
-const DOC_FILL = "#A9B8D8";
+const NODE = "#C9BEF5"; // memory: soft lavender
+const NODE_BRIGHT = "#EEE9FF"; // important memory
+const NODE_FAINT = "#9A8FCB"; // low-importance memory
+const NODE_HUB = "#E3DBFF"; // project hub / starred (core)
+const NOTE = "#8DB0E3"; // note: cool blue
+const NOTE_HUB = "#C2D5F4"; // most connected notes (index notes)
+const FOLDER_TINTS = ["#A78BFA", "#8FB4E8", "#B9A7F7", "#7FA6DB", "#C4B5FD", "#9BBCEB"];
 
-/** Luminous white / grey / muted lavender cores, by what the memory is. */
-function coreColor(n: { category: string; importance: number; starred?: boolean }): string {
+/** Lavender (memories) and cool blue (notes) neurons; brightness from real importance and connectivity. */
+function coreColor(n: { category: string; importance: number; starred?: boolean; kind?: string; hub?: boolean }): string {
+  if (n.kind === "document") return n.hub ? NOTE_HUB : NOTE;
   if (n.category === "project" || n.starred) return NODE_HUB;
   if (n.importance >= 0.7) return NODE_BRIGHT;
   if (n.importance < 0.35) return NODE_FAINT;
@@ -219,9 +280,12 @@ function hash01(id: string): number {
 const ACCENT = "#A78BFA";
 const ACCENT_SOFT = "#C4B5FD";
 
+/** Size from real data: connections (log scale, so index notes don't become giant) and, for memories, importance. */
 function radius(n: GraphNodeData, size: number): number {
-  const base = n.category === "project" ? 5 : 2.6;
-  return (base + Math.sqrt(Math.max(0, n.degree)) * 1.05 + n.importance * 0.9) * size;
+  const doc = n.kind === "document";
+  const base = n.category === "project" ? 5 : doc ? 2.1 : 2.5;
+  const r = base + Math.log2(1 + Math.max(0, n.degree)) * 1.05 + (doc ? 0 : n.importance * 1.3);
+  return Math.min(12, r) * size;
 }
 
 /** Radial glow sprite, rendered once and reused for every node (cheap drawImage instead of blur). */
@@ -262,12 +326,28 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
   const labelAlpha = useRef(0);
   const fitted = useRef(false);
   const lastFrame = useRef(0);
-  const sprites = useRef<{ white: HTMLCanvasElement; lavender: HTMLCanvasElement } | null>(null);
+  const sprites = useRef<{ white: HTMLCanvasElement; lavender: HTMLCanvasElement; blue: HTMLCanvasElement } | null>(null);
   const tree = useRef<{ q: Quadtree<SimNode>; version: number } | null>(null);
   const posVersion = useRef(0);
   const pendingNew = useRef(new Map<string, number>());
   const pendingLinks = useRef(new Map<string, number>());
-  const counters = useRef({ frames: 0, lastFrameMs: 0, breathFrames: 0 });
+  const counters = useRef({ frames: 0, lastFrameMs: 0, breathFrames: 0, visEdges: 0, bundles: 0, labels: 0, detail: 0, pulses: 0 });
+  /** Links drawn last frame (sets link opacity: many on screen → each fainter). */
+  const visEdges = useRef(1500);
+  const edgesInView = useRef(1500);
+  /** True when the layout is grouped (projects / note folders): links between groups bundle when zoomed out. */
+  const grouped = useRef(false);
+  /** Real number of links between each pair of groups (for the bundles). */
+  const crossPairs = useRef(new Map<string, { a: string; b: string; count: number }>());
+  const groupState = useRef<{ version: number; minBundle: number; centroids: Map<string, { x: number; y: number; n: number }>; bundles: { ax: number; ay: number; bx: number; by: number; count: number; bend: number }[] }>({ version: -1, minBundle: 1, centroids: new Map(), bundles: [] });
+  /** Group anchors (cached so small data changes don't move whole regions). */
+  const anchorCache = useRef<{ key: string; map: Map<string, { x: number; y: number; R: number }> } | null>(null);
+  /** Links touching something that changed recently: the pool for the occasional activity pulse. */
+  const activityLinks = useRef<SimLink[]>([]);
+  const pulses = useRef<Pulse[]>([]);
+  const rippleAt = useRef(0);
+  const maxR = useRef(14);
+  const relaid = useRef(false);
   const ambientTimer = useRef<number | null>(null);
   const moteCanvas = useRef<HTMLCanvasElement>(null);
   const regionCanvas = useRef<HTMLCanvasElement>(null);
@@ -298,13 +378,65 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
   const ambientOn = () => (live.current.ambient ?? ambientEnabled()) && !live.current.compact && motion() !== "minimal";
 
   // ------------------------------------------------------------------ drawing
+  /** Quadratic "pathway" between two nodes: a gentle, stable bend per link. */
+  const pathway = (g: CanvasRenderingContext2D | Path2D, ax: number, ay: number, bx: number, by: number, bend: number, upto = 1) => {
+    const cx = (ax + bx) / 2 - (by - ay) * bend;
+    const cy = (ay + by) / 2 + (bx - ax) * bend;
+    g.moveTo(ax, ay);
+    if (upto >= 1) g.quadraticCurveTo(cx, cy, bx, by);
+    else {
+      // Partial reveal (new relationship): split the curve at `upto` (de Casteljau).
+      const qx = ax + (cx - ax) * upto, qy = ay + (cy - ay) * upto;
+      const rx = cx + (bx - cx) * upto, ry = cy + (by - cy) * upto;
+      g.quadraticCurveTo(qx, qy, qx + (rx - qx) * upto, qy + (ry - qy) * upto);
+    }
+  };
+  /** Point on a pathway at u (0..1). */
+  const along = (ax: number, ay: number, bx: number, by: number, bend: number, u: number) => {
+    const cx = (ax + bx) / 2 - (by - ay) * bend;
+    const cy = (ay + by) / 2 + (bx - ax) * bend;
+    const v = 1 - u;
+    return { x: v * v * ax + 2 * v * u * cx + u * u * bx, y: v * v * ay + 2 * v * u * cy + u * u * by };
+  };
+
+  /** Group centroids and the bundles between them (recomputed only when positions change). */
+  const groupGeometry = () => {
+    const gs = groupState.current;
+    if (gs.version === posVersion.current) return gs;
+    const acc = new Map<string, { x: number; y: number; n: number }>();
+    for (const n of nodesRef.current) {
+      if (!n.group) continue;
+      const a = acc.get(n.group) ?? acc.set(n.group, { x: 0, y: 0, n: 0 }).get(n.group)!;
+      a.x += n.x!;
+      a.y += n.y!;
+      a.n++;
+    }
+    const cent = new Map<string, { x: number; y: number; n: number }>();
+    for (const [g, a] of acc) cent.set(g, { x: a.x / a.n, y: a.y / a.n, n: a.n });
+    const bundles: { ax: number; ay: number; bx: number; by: number; count: number; bend: number }[] = [];
+    for (const [key, cp] of crossPairs.current) {
+      const a = cent.get(cp.a);
+      const b = cent.get(cp.b);
+      if (!a || !b) continue;
+      bundles.push({ ax: a.x, ay: a.y, bx: b.x, by: b.y, count: cp.count, bend: (hash01(key) - 0.5) * 0.28 });
+    }
+    // Zoomed out, only the strongest connections between regions are bundled (at most ~160), so the overview stays
+    // readable; zooming in reveals every individual link anyway.
+    const counts = bundles.map((b) => b.count).sort((a, b) => b - a);
+    gs.minBundle = Math.max(1, counts[159] ?? 1);
+    gs.version = posVersion.current;
+    gs.centroids = cent;
+    gs.bundles = bundles;
+    return gs;
+  };
+
   const draw = (now: number) => {
     const c = canvas.current;
     if (!c) return;
     const ctx = c.getContext("2d");
     if (!ctx) return;
     const t0 = performance.now();
-    if (!sprites.current) sprites.current = { white: makeSprite("236,234,255"), lavender: makeSprite("167,139,250") };
+    if (!sprites.current) sprites.current = { white: makeSprite("236,234,255"), lavender: makeSprite("167,139,250"), blue: makeSprite("143,180,232") };
     const { w, h, dpr } = size.current;
     const t = transform.current;
     const p = live.current;
@@ -351,10 +483,16 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     ctx.translate(t.x, t.y);
     ctx.scale(t.k, t.k);
 
-    const zoomedOut = t.k < 0.35;
+    // Level of detail: 0 = overview (zoomed out), 1 = every neuron and pathway.
+    const detail = p.compact ? 0.35 : smooth01((t.k - 0.3) / 0.6);
+    const zoomedOut = detail < 0.15;
     const amb = ambientOn();
+    // Viewport in graph coordinates (with a margin): nothing outside it is drawn.
+    const vm = 40 / t.k;
+    const vx0 = -t.x / t.k - vm, vy0 = -t.y / t.k - vm, vx1 = (w - t.x) / t.k + vm, vy1 = (h - t.y) / t.k + vm;
+    const inView = (x: number, y: number, r: number) => x + r >= vx0 && x - r <= vx1 && y + r >= vy0 && y - r <= vy1;
 
-    // ---- clusters: soft areas of thought, computed from real positions of each project's memories, eased.
+    // ---- clusters: soft areas of thought (projects and note folders), from real positions of their members, eased.
     const showClusters = !p.compact && !!p.clusters?.length && p.clusterByProject !== false;
     if (showClusters) {
       const names = new Map(p.clusters!.map((c) => [c.id, c.name]));
@@ -363,9 +501,9 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
       if (!targets || targets.version !== posVersion.current || targets.key !== key) {
         const groups = new Map<string, SimNode[]>();
         for (const n of nodesRef.current) {
-          if (!n.project_id || !names.has(n.project_id)) continue;
-          let g = groups.get(n.project_id);
-          if (!g) groups.set(n.project_id, (g = []));
+          if (!n.group || !names.has(n.group)) continue;
+          let g = groups.get(n.group);
+          if (!g) groups.set(n.group, (g = []));
           g.push(n);
         }
         const items = new Map<string, { cx: number; cy: number; r: number; members: SimNode[] }>();
@@ -381,16 +519,17 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
         targets = clusterTargets.current = { version: posVersion.current, key, items };
       }
       for (const c of clusters.current.values()) c.seen = false;
+      const tint = (id: string) => p.projectColors?.get(id) ?? FOLDER_TINTS[Math.floor(hash01(id) * FOLDER_TINTS.length)];
       for (const [id, { cx, cy, r: tr, members }] of targets.items) {
         let c = clusters.current.get(id);
         if (!c) {
-          c = { id, name: names.get(id)!, x: cx, y: cy, r: tr, a: 0, hot: 0, color: p.projectColors?.get(id) ?? ACCENT, members, seen: true };
+          c = { id, name: names.get(id)!, x: cx, y: cy, r: tr, a: 0, hot: 0, color: tint(id), members, seen: true };
           clusters.current.set(id, c);
         }
         c.seen = true;
         c.members = members;
         c.name = names.get(id)!;
-        c.color = p.projectColors?.get(id) ?? ACCENT;
+        c.color = tint(id);
         const kk = m === "minimal" ? 1 : 1 - Math.exp(-dt / 240); // slow, calm transitions
         const bx = c.x, by = c.y, br = c.r;
         c.x = approach(c.x, cx, kk);
@@ -413,30 +552,81 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
       paintRegions(0);
     }
 
-    // ---- edges: one batched pass for ordinary edges, individual passes only for highlighted/new ones
-    const lw = (0.75 * s.linkThickness) / Math.max(0.55, Math.sqrt(t.k));
+    // ---- pathways
+    const lw = (0.7 * s.linkThickness) / Math.max(0.55, Math.sqrt(t.k));
     let dimMix = 0;
     if (focusNode || hl) {
       let sum = 0;
       for (const n of nodesRef.current) sum += n.dim;
       dimMix = nodesRef.current.length ? Math.min(1, (sum / nodesRef.current.length) * 1.6) : 0;
     }
-    const baseEdgeA = (zoomedOut ? 0.1 : 0.16) * (1 - 0.72 * dimMix);
-    ctx.lineWidth = lw;
-    ctx.strokeStyle = `rgba(190,190,205,${baseEdgeA})`;
-    ctx.beginPath();
+    // Fewer links on screen → each can be a little more visible; thousands → each one fainter.
+    const dens = Math.max(0.45, Math.min(1, Math.sqrt(1800 / Math.max(1, visEdges.current))));
+    const baseA = (p.compact ? 0.12 : 0.06 + 0.12 * detail) * dens * (1 - 0.75 * dimMix);
+    const bundled = grouped.current && !p.compact; // links between groups are bundled when zoomed out
+    const crossA = bundled ? baseA * detail : baseA;
+    const hubA = baseA * 0.38;
+    const intraPath = new Path2D();
+    const crossPath = new Path2D();
+    const hubPath = new Path2D();
     const special: SimLink[] = [];
+    let vis = 0;
+    let inViewCount = 0;
+    // Progressive detail: zoomed out with thousands of links on screen, a stable subset of them is drawn (always
+    // the same links, chosen by id); all of them come back as you zoom in. Bundles and regions carry the overview.
+    const keep = detail >= 0.85 ? 1 : Math.min(1, 4500 / Math.max(1, edgesInView.current) + detail * 1.2);
     for (const l of linksRef.current) {
+      const a = l.source as SimNode;
+      const b = l.target as SimNode;
       if (l.hi > 0.01 || (l.bornAt && now - l.bornAt < 1800)) {
         special.push(l);
         continue;
       }
-      const a = l.source as SimNode;
-      const b = l.target as SimNode;
-      ctx.moveTo(a.x!, a.y!);
-      ctx.lineTo(b.x!, b.y!);
+      // Viewport culling (the bend stays within the segment's box plus a margin).
+      if (Math.max(a.x!, b.x!) < vx0 || Math.min(a.x!, b.x!) > vx1 || Math.max(a.y!, b.y!) < vy0 || Math.min(a.y!, b.y!) > vy1) continue;
+      inViewCount++;
+      if (keep < 1 && l.lod > keep) continue;
+      if (l.hubby) {
+        if (hubA < 0.004) continue;
+        pathway(hubPath, a.x!, a.y!, b.x!, b.y!, l.curve);
+      } else if (l.cross) {
+        if (crossA < 0.004) continue;
+        pathway(crossPath, a.x!, a.y!, b.x!, b.y!, l.curve);
+      } else pathway(intraPath, a.x!, a.y!, b.x!, b.y!, l.curve);
+      vis++;
     }
-    ctx.stroke();
+    visEdges.current = Math.max(1, vis);
+    edgesInView.current = inViewCount;
+    ctx.lineWidth = lw;
+    ctx.strokeStyle = `rgba(178,170,228,${baseA})`;
+    ctx.stroke(intraPath);
+    if (crossA >= 0.004) {
+      ctx.strokeStyle = `rgba(150,176,232,${crossA})`;
+      ctx.stroke(crossPath);
+    }
+    if (hubA >= 0.004) {
+      ctx.strokeStyle = `rgba(170,170,215,${hubA})`;
+      ctx.stroke(hubPath);
+    }
+    // ---- bundles: one soft pathway per pair of groups, as wide as the real number of links between them.
+    let bundlesDrawn = 0;
+    const bundleA = bundled ? (1 - detail) * (1 - 0.7 * dimMix) : 0;
+    if (bundleA > 0.02) {
+      const gg = groupGeometry();
+      ctx.lineCap = "round";
+      for (const bd of gg.bundles) {
+        if (bd.count < gg.minBundle) continue;
+        if (Math.max(bd.ax, bd.bx) < vx0 || Math.min(bd.ax, bd.bx) > vx1 || Math.max(bd.ay, bd.by) < vy0 || Math.min(bd.ay, bd.by) > vy1) continue;
+        const lg = Math.log2(1 + bd.count);
+        ctx.lineWidth = lw * (0.8 + lg * 0.75);
+        ctx.strokeStyle = `rgba(160,160,232,${Math.min(0.2, (0.03 + 0.016 * lg) * bundleA)})`;
+        ctx.beginPath();
+        pathway(ctx, bd.ax, bd.ay, bd.bx, bd.by, bd.bend);
+        ctx.stroke();
+        bundlesDrawn++;
+      }
+      ctx.lineCap = "butt";
+    }
     for (const l of special) {
       const a = l.source as SimNode;
       const b = l.target as SimNode;
@@ -448,14 +638,11 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
           reveal = m === "minimal" ? 1 : Math.min(1, age / 650);
         }
       }
-      const ex = a.x! + (b.x! - a.x!) * reveal;
-      const ey = a.y! + (b.y! - a.y!) * reveal;
-      const alpha = Math.max(baseEdgeA, 0.16 + 0.55 * l.hi) * (l.bornAt && now - l.bornAt < 1800 ? 1 : 1);
+      const alpha = Math.max(baseA, 0.16 + 0.55 * l.hi);
       ctx.strokeStyle = l.hi > 0.5 ? `rgba(196,181,253,${alpha})` : `rgba(205,200,235,${Math.max(alpha, 0.3)})`;
       ctx.lineWidth = lw * (1 + 0.5 * l.hi);
       ctx.beginPath();
-      ctx.moveTo(a.x!, a.y!);
-      ctx.lineTo(ex, ey);
+      pathway(ctx, a.x!, a.y!, b.x!, b.y!, l.curve, reveal);
       ctx.stroke();
     }
     // ---- a path of real stored relationships, bright lavender
@@ -467,8 +654,7 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
         if (!p.edgeHighlight.has(l.id)) continue;
         const a = l.source as SimNode;
         const b = l.target as SimNode;
-        ctx.moveTo(a.x!, a.y!);
-        ctx.lineTo(b.x!, b.y!);
+        pathway(ctx, a.x!, a.y!, b.x!, b.y!, l.curve);
       }
       ctx.stroke();
     }
@@ -493,7 +679,10 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
       for (const l of linksRef.current) {
         const a = l.source as SimNode;
         const b = l.target as SimNode;
-        const ang = Math.atan2(b.y! - a.y!, b.x! - a.x!);
+        if (!inView(b.x!, b.y!, 10)) continue;
+        // Direction at the end of the bend.
+        const q = along(a.x!, a.y!, b.x!, b.y!, l.curve, 0.92);
+        const ang = Math.atan2(b.y! - q.y, b.x! - q.x);
         const ex = b.x! - Math.cos(ang) * (b.r + 1.5);
         const ey = b.y! - Math.sin(ang) * (b.r + 1.5);
         ctx.beginPath();
@@ -504,12 +693,14 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
       }
     }
 
-    // ---- glow (additive), behind the node cores
+    // ---- glow (additive), behind the neuron cores. Every neuron gets a faint halo when you're close enough to
+    // see it; core memories and hubs carry a little more light even in the overview. No blur, cached sprites.
     const sp = sprites.current;
     ctx.globalCompositeOperation = "lighter";
-    const idleGlow = m === "full" ? 0.16 : m === "balanced" ? 0.12 : 0.06;
+    const idleGlow = m === "full" ? 0.18 : m === "balanced" ? 0.15 : 0.08;
     let anyBreath = false;
     for (const n of nodesRef.current) {
+      if (!inView(n.x!, n.y!, n.r * 7)) continue;
       let g = n.glow;
       // The selected memory breathes gently (ambient only): its steady part is drawn here,
       // the slowly varying part on the breathing layer (drawBreath), so idle frames stay cheap.
@@ -533,24 +724,22 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
         } else n.pulseAt = 0;
       }
       let idle = 0;
-      if (idleGlow && n.dim < 0.5 && (!zoomedOut || n.core)) {
-        idle = idleGlow * (0.5 + n.importance * 0.7) * (n.category === "project" ? 1.4 : 1);
-        if (n.core) {
-          // Core memories (starred, project hubs, very important) carry a little more light and breathe
-          // (steady part here, breathing part on the breathing layer).
-          idle = Math.max(idle, 0.2);
-          if (amb) {
-            idle *= 0.78;
+      if (n.dim < 0.5) {
+        if (n.core || n.hub) {
+          idle = Math.max(idleGlow * (0.5 + n.importance * 0.7) * (n.category === "project" ? 1.4 : 1), 0.17);
+          if (n.core && amb) {
+            idle *= 0.78; // the breathing part is on the breathing layer
             anyBreath = true;
           }
-        }
+        } else if (!zoomedOut) idle = idleGlow * 0.55 * detail;
       }
       const intensity = Math.max(g, idle) * (1 - 0.85 * n.dim);
       if (intensity < 0.01) continue;
-      let R = Math.max(n.r * (3.4 + 2.6 * n.glow + n.grow * 0.6), (6 + 14 * Math.max(n.glow, g * 0.8)) / Math.max(0.5, t.k));
+      let R = Math.max(n.r * (3.2 + 2.6 * n.glow + n.grow * 0.6), (6 + 14 * Math.max(n.glow, g * 0.8)) / Math.max(0.5, t.k));
       // A real new memory or update briefly lights up its surroundings.
       if ((n.appearAt || n.pulseAt) && m !== "minimal") R = Math.max(R, (22 + 26 * g) / Math.max(0.5, t.k));
-      const sprite = n.glow > 0.5 || n.id === p.selectedId || (n.appearAt && m !== "minimal") || (n.core && n.starred) ? sp.lavender : sp.white;
+      const accent = n.glow > 0.5 || n.id === p.selectedId || (n.appearAt && m !== "minimal") || (n.core && n.starred);
+      const sprite = accent ? sp.lavender : n.kind === "document" ? sp.blue : n.core ? sp.lavender : sp.white;
       ctx.globalAlpha = Math.min(1, intensity);
       ctx.drawImage(sprite, n.x! - R, n.y! - R, R * 2, R * 2);
     }
@@ -567,20 +756,22 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
         const b = l.target as SimNode;
         const u = Math.min(1, Math.max(0, (age - 300) / 1100));
         if (u <= 0 || u >= 1) continue;
-        const x = a.x! + (b.x! - a.x!) * u;
-        const y = a.y! + (b.y! - a.y!) * u;
+        const q = along(a.x!, a.y!, b.x!, b.y!, l.curve, u);
         const R = 7 / Math.max(0.6, Math.sqrt(t.k));
         ctx.globalCompositeOperation = "lighter";
         ctx.globalAlpha = Math.sin(Math.PI * u) * 0.9;
-        ctx.drawImage(sp.lavender, x - R, y - R, R * 2, R * 2);
+        ctx.drawImage(sp.lavender, q.x - R, q.y - R, R * 2, R * 2);
         ctx.globalCompositeOperation = "source-over";
       }
     }
 
-    // ---- node cores
+    // ---- neuron cores
     for (const n of nodesRef.current) {
-      let scale = 1 + 0.28 * n.grow;
-      let alpha = 1 - 0.8 * n.dim;
+      if (!inView(n.x!, n.y!, n.r * 1.5 + 6)) continue;
+      // Overview: ordinary neurons are a touch smaller and softer, so regions read as shapes; they sharpen as you zoom.
+      const plain = !n.core && !n.hub && n.hi < 0.5 && n.id !== p.selectedId;
+      let scale = (1 + 0.28 * n.grow) * (plain ? 0.82 + 0.18 * detail : 1);
+      let alpha = (1 - 0.8 * n.dim) * (plain ? 0.72 + 0.28 * detail : 1);
       if (n.appearAt) {
         const age = now - n.appearAt;
         const u = m === "minimal" ? 1 : Math.min(1, age / 700);
@@ -593,16 +784,11 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
       if (n.id === p.selectedId) fill = ACCENT_SOFT;
       else if (focusNode && n.id === focusNode.id) fill = "#FFFFFF";
       else if (hl?.has(n.id) && !focusNode) fill = ACCENT_SOFT;
-      else if (n.hi > 0.5) fill = "#EDEDF2";
+      else if (n.hi > 0.5) fill = n.kind === "document" ? "#DCE8FA" : "#F1EDFF";
       ctx.globalAlpha = Math.max(0.06, alpha);
       ctx.fillStyle = fill;
       ctx.beginPath();
-      if (n.kind === "document") {
-        // Notes: small rounded squares in a cool blue-grey, so they read differently from memories.
-        const r = n.r * scale * 0.92;
-        if (fill === NODE || fill === NODE_BRIGHT || fill === NODE_FAINT || fill === NODE_HUB) ctx.fillStyle = DOC_FILL;
-        ctx.roundRect(n.x! - r, n.y! - r, r * 2, r * 2, r * 0.45);
-      } else ctx.arc(n.x!, n.y!, n.r * scale, 0, Math.PI * 2);
+      ctx.arc(n.x!, n.y!, n.r * scale, 0, Math.PI * 2);
       ctx.fill();
       if (n.id === p.selectedId) {
         ctx.globalAlpha = 0.9;
@@ -629,48 +815,43 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
       }
     }
     ctx.globalAlpha = 1;
-
-    // ---- labels: fade in with zoom like Obsidian; important nodes keep theirs a bit longer
-    if (s.showLabels && !p.compact) {
-      const target = Math.max(0, Math.min(1, (t.k - s.textFadeThreshold * 0.75) / (s.textFadeThreshold * 0.35)));
-      const before = labelAlpha.current;
-      labelAlpha.current = approach(labelAlpha.current, target, m === "minimal" ? 1 : 0.25);
-      if (labelAlpha.current !== before) moving = true;
-      const fontPx = 11.5 / t.k;
-      ctx.font = `450 ${fontPx}px "Geist Variable", "Segoe UI", system-ui, sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-      for (const n of nodesRef.current) {
-        const isFocus = n.hi > 0.5 || n.id === p.selectedId;
-        const bigEnough = n.r * t.k > 8.5;
-        let a = isFocus ? Math.max(n.hi, n.id === p.selectedId ? 1 : 0) : Math.max(labelAlpha.current, bigEnough ? 0.8 : 0);
-        a *= 1 - 0.85 * n.dim;
-        if (a < 0.03) continue;
-        const sx = n.x! * t.k + t.x;
-        const sy = n.y! * t.k + t.y;
-        if (sx < -200 || sx > w + 200 || sy < -40 || sy > h + 40) continue;
-        ctx.globalAlpha = a;
-        ctx.fillStyle = isFocus ? "#F5F5F7" : "#9C9CAC";
-        const label = n.title.length > 42 ? n.title.slice(0, 40) + "…" : n.title;
-        ctx.fillText(label, n.x!, n.y! + n.r * (1 + 0.28 * n.grow) + 3.5 / t.k);
-      }
-      ctx.globalAlpha = 1;
-    }
     ctx.restore();
 
-    // ---- cluster names (screen space): readable when zoomed out, fading as memory labels take over
+    // ---- labels (screen space). Placed by priority and never on top of each other: cluster names first (they
+    // matter most zoomed out), then the focused / selected / highlighted neurons, then the most connected ones.
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const taken: { x0: number; y0: number; x1: number; y1: number }[] = [];
+    const hv0 = hover.current;
+    if (hv0 && !p.compact) {
+      // The hover tooltip is drawn last: keep labels out from under it.
+      const sx = hv0.x! * t.k + t.x;
+      const sy = hv0.y! * t.k + t.y - hv0.r * t.k * 1.3 - 12;
+      taken.push({ x0: sx - 220, y0: Math.max(6, sy - 24), x1: sx + 220, y1: Math.max(6, sy - 24) + 26 });
+    }
+    ctx.lineJoin = "round";
+    const outline = (text: string, x: number, y: number) => {
+      ctx.strokeStyle = "rgba(11,11,16,0.72)";
+      ctx.lineWidth = 3;
+      ctx.strokeText(text, x, y);
+      ctx.fillText(text, x, y);
+    };
+    const free = (x0: number, y0: number, x1: number, y1: number) => {
+      for (const r of taken) if (x0 < r.x1 && x1 > r.x0 && y0 < r.y1 && y1 > r.y0) return false;
+      return true;
+    };
+    // Keep the toolbar area and the status line clear.
     clusterLabels.current = [];
     if (showClusters && clusters.current.size) {
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.font = `600 10.5px "Geist Variable", "Segoe UI", system-ui, sans-serif`;
       (ctx as any).letterSpacing = "0.14em";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       const zoomFade = Math.max(0, Math.min(1, (2.3 - t.k) / 0.9));
-      const focusIn = focusNode?.project_id ?? null;
-      for (const c of clusters.current.values()) {
+      const focusIn = focusNode?.group ?? null;
+      const list = [...clusters.current.values()].sort((a, b) => b.members.length - a.members.length);
+      for (const c of list) {
         const sr = c.r * t.k;
-        if (sr < 26 || c.a < 0.05) continue;
+        if (sr < 22 || c.a < 0.05) continue;
         const sx = c.x * t.k + t.x;
         const sy = (c.y - c.r * 0.98) * t.k + t.y - 4;
         if (sx < -150 || sx > w + 150 || sy < -20 || sy > h + 20) continue;
@@ -680,12 +861,54 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
         const label = (c.name.length > 32 ? c.name.slice(0, 30) + "…" : c.name).toUpperCase();
         const tw = ctx.measureText(label).width;
         const ly = Math.max(74, Math.min(h - 40, sy)); // stay clear of the toolbar and the status line
+        const box = { x0: sx - tw / 2 - 6, y0: ly - 9, x1: sx + tw / 2 + 6, y1: ly + 9 };
+        if (!free(box.x0, box.y0, box.x1, box.y1) && c.hot < 0.5) continue;
+        taken.push(box);
         ctx.globalAlpha = a;
         ctx.fillStyle = c.hot > 0.5 ? "#E9E5FF" : "#C9C3E8";
-        ctx.fillText(label, sx, ly);
+        outline(label, sx, ly);
         clusterLabels.current.push({ id: c.id, x0: sx - tw / 2 - 8, y0: ly - 11, x1: sx + tw / 2 + 8, y1: ly + 11 });
       }
       (ctx as any).letterSpacing = "0px";
+      ctx.globalAlpha = 1;
+    }
+    let labelsDrawn = 0;
+    if (s.showLabels && !p.compact) {
+      const target = Math.max(0, Math.min(1, (t.k - s.textFadeThreshold * 0.75) / (s.textFadeThreshold * 0.35)));
+      const before = labelAlpha.current;
+      labelAlpha.current = approach(labelAlpha.current, target, m === "minimal" ? 1 : 0.25);
+      if (labelAlpha.current !== before) moving = true;
+      const cands: { n: SimNode; a: number; pri: number; focus: boolean }[] = [];
+      for (const n of nodesRef.current) {
+        if (hv0 && n === hv0 && hv0.grow > 0.05) continue; // its name is in the tooltip
+        const isFocus = n.hi > 0.5 || n.id === p.selectedId;
+        const bigEnough = n.r * t.k > 8.5;
+        let a = isFocus ? Math.max(n.hi, n.id === p.selectedId ? 1 : 0) : Math.max(labelAlpha.current, bigEnough ? 0.8 : 0);
+        a *= 1 - 0.85 * n.dim;
+        if (a < 0.03) continue;
+        const sx = n.x! * t.k + t.x;
+        const sy = n.y! * t.k + t.y;
+        if (sx < -200 || sx > w + 200 || sy < -40 || sy > h + 40) continue;
+        const pri = (n.id === p.selectedId ? 4e6 : 0) + (focusNode && n.id === focusNode.id ? 3e6 : 0) + (isFocus ? 2e6 : 0) + (hl?.has(n.id) ? 1e6 : 0) + n.r * 1000 + n.deg;
+        cands.push({ n, a, pri, focus: isFocus });
+      }
+      cands.sort((x, y) => y.pri - x.pri);
+      ctx.font = `450 11.5px "Geist Variable", "Segoe UI", system-ui, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      for (const { n, a, focus } of cands.slice(0, 600)) {
+        const label = n.title.length > 42 ? n.title.slice(0, 40) + "…" : n.title;
+        const sx = n.x! * t.k + t.x;
+        const sy = (n.y! + n.r * (1 + 0.28 * n.grow)) * t.k + t.y + 3.5;
+        const tw = ctx.measureText(label).width;
+        const box = { x0: sx - tw / 2 - 3, y0: sy - 1, x1: sx + tw / 2 + 3, y1: sy + 14 };
+        if (!free(box.x0, box.y0, box.x1, box.y1)) continue;
+        taken.push(box);
+        ctx.globalAlpha = a;
+        ctx.fillStyle = focus ? "#F5F5F7" : "#A3A2B6";
+        outline(label, sx, sy);
+        labelsDrawn++;
+      }
       ctx.globalAlpha = 1;
     }
 
@@ -718,20 +941,31 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
 
     counters.current.frames++;
     counters.current.lastFrameMs = performance.now() - t0;
+    counters.current.visEdges = vis;
+    counters.current.bundles = bundlesDrawn;
+    counters.current.labels = labelsDrawn;
+    counters.current.detail = detail;
     drawBreath(now);
     if (moving && !document.hidden) requestDraw();
   };
 
   /** The breathing layer: only the slowly varying light (core memories, the selected memory and the light
-   *  flowing along its connections). Redrawing it touches a handful of sprites, never the whole graph. */
+   *  flowing along its connections) plus the few travelling pulses and the selection ripple. Redrawing it touches
+   *  a handful of sprites, never the whole graph. */
   const drawBreath = (now: number) => {
     const bc = breathCanvas.current;
     const g = bc?.getContext("2d");
     if (!bc || !g || !sprites.current) return;
     const amb = ambientOn();
-    const disp = amb ? "block" : "none";
+    const m = motion();
+    // Drop finished pulses / ripple.
+    if (pulses.current.length) pulses.current = pulses.current.filter((pu) => now - pu.start < pu.dur);
+    const rippling = m !== "minimal" && rippleAt.current > 0 && now - rippleAt.current < 1000;
+    const busy = m !== "minimal" && (pulses.current.length > 0 || rippling);
+    const disp = amb || busy ? "block" : "none";
     if (bc.style.display !== disp) bc.style.display = disp;
-    if (!amb) return;
+    counters.current.pulses = pulses.current.length;
+    if (!amb && !busy) return;
     const { w, h, dpr } = size.current;
     if (bc.width !== Math.round(w * dpr) || bc.height !== Math.round(h * dpr)) {
       bc.width = Math.round(w * dpr);
@@ -741,48 +975,129 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     }
     const t = transform.current;
     const p = live.current;
-    const m = motion();
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, w, h);
     g.translate(t.x, t.y);
     g.scale(t.k, t.k);
     g.globalCompositeOperation = "lighter";
     const sp = sprites.current;
-    const idleGlow = m === "full" ? 0.16 : 0.12;
-    const breath = 0.5 + 0.5 * Math.sin(now / 680); // ~4.3 s cycle
-    const x0 = -t.x / t.k - 60, y0 = -t.y / t.k - 60, x1 = (w - t.x) / t.k + 60, y1 = (h - t.y) / t.k + 60;
-    for (const n of nodesRef.current) {
-      if (n.x! < x0 || n.x! > x1 || n.y! < y0 || n.y! > y1) continue;
-      let a = 0;
-      if (n.core && n.dim < 0.5) {
-        const idle = Math.max(idleGlow * (0.5 + n.importance * 0.7) * (n.category === "project" ? 1.4 : 1), 0.2);
-        a = idle * 0.32 * (0.5 + 0.5 * Math.sin(now / 680 + n.phase));
+    if (amb) {
+      const idleGlow = m === "full" ? 0.18 : 0.15;
+      const breath = 0.5 + 0.5 * Math.sin(now / 680); // ~4.3 s cycle
+      const x0 = -t.x / t.k - 60, y0 = -t.y / t.k - 60, x1 = (w - t.x) / t.k + 60, y1 = (h - t.y) / t.k + 60;
+      for (const n of nodesRef.current) {
+        if (n.x! < x0 || n.x! > x1 || n.y! < y0 || n.y! > y1) continue;
+        let a = 0;
+        if (n.core && n.dim < 0.5) {
+          const idle = Math.max(idleGlow * (0.5 + n.importance * 0.7) * (n.category === "project" ? 1.4 : 1), 0.17);
+          a = idle * 0.32 * (0.5 + 0.5 * Math.sin(now / 680 + n.phase));
+        }
+        if (n.id === p.selectedId && n.glow > 0.3) a = Math.max(a, n.glow * 0.16 * breath);
+        a *= 1 - 0.85 * n.dim;
+        if (a < 0.005) continue;
+        const R = Math.max(n.r * (3.2 + 2.6 * n.glow + n.grow * 0.6), (6 + 14 * n.glow) / Math.max(0.5, t.k));
+        g.globalAlpha = Math.min(1, a);
+        g.drawImage(n.glow > 0.5 || n.id === p.selectedId || n.starred ? sp.lavender : sp.white, n.x! - R, n.y! - R, R * 2, R * 2);
       }
-      if (n.id === p.selectedId && n.glow > 0.3) a = Math.max(a, n.glow * 0.16 * breath + 0.0);
-      a *= 1 - 0.85 * n.dim;
-      if (a < 0.005) continue;
-      const R = Math.max(n.r * (3.4 + 2.6 * n.glow + n.grow * 0.6), (6 + 14 * n.glow) / Math.max(0.5, t.k));
-      g.globalAlpha = Math.min(1, a);
-      g.drawImage(n.glow > 0.5 || n.id === p.selectedId || n.starred ? sp.lavender : sp.white, n.x! - R, n.y! - R, R * 2, R * 2);
+      // Light flows slowly outward along the selected memory's real connections.
+      const sel = p.selectedId ? byId.current.get(p.selectedId) : undefined;
+      if (sel && !p.compact) {
+        const R = 4.2 / Math.max(0.6, Math.sqrt(t.k));
+        for (const l of linksRef.current) {
+          if (l.hi < 0.05) continue;
+          const a = l.source as SimNode;
+          const b = l.target as SimNode;
+          if (a !== sel && b !== sel) continue;
+          const to = a === sel ? b : a;
+          const u = (now / 2800 + hash01(l.id)) % 1;
+          const q = along(sel.x!, sel.y!, to.x!, to.y!, a === sel ? l.curve : -l.curve, u);
+          g.globalAlpha = Math.sin(Math.PI * u) * 0.5 * l.hi * (1 - 0.6 * to.dim);
+          g.drawImage(sp.lavender, q.x - R, q.y - R, R * 2, R * 2);
+        }
+      }
     }
-    // Light flows slowly outward along the selected memory's real connections.
-    const sel = p.selectedId ? byId.current.get(p.selectedId) : undefined;
-    if (sel && !p.compact) {
-      const R = 4.2 / Math.max(0.6, Math.sqrt(t.k));
-      for (const l of linksRef.current) {
-        if (l.hi < 0.05) continue;
-        const a = l.source as SimNode;
-        const b = l.target as SimNode;
-        if (a !== sel && b !== sel) continue;
-        const to = a === sel ? b : a;
-        const u = (now / 2800 + hash01(l.id)) % 1;
-        g.globalAlpha = Math.sin(Math.PI * u) * 0.5 * l.hi * (1 - 0.6 * to.dim);
-        g.drawImage(sp.lavender, sel.x! + (to.x! - sel.x!) * u - R, sel.y! + (to.y! - sel.y!) * u - R, R * 2, R * 2);
+    if (busy) {
+      // Pulses: a small glint travelling along a real connection, with a faint trail; the neuron it reaches
+      // lights up briefly as it arrives.
+      const R = 5.2 / Math.max(0.6, Math.sqrt(t.k));
+      for (const pu of pulses.current) {
+        const u = Math.min(1, (now - pu.start) / pu.dur);
+        const e = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
+        const sprite = pu.blue ? sp.blue : sp.lavender;
+        const fade = 1 - 0.7 * Math.max(pu.from.dim, pu.to.dim);
+        for (const [du, f] of [[0, 1], [0.07, 0.45], [0.14, 0.2]] as const) {
+          const uu = e - du;
+          if (uu <= 0) continue;
+          const q = along(pu.from.x!, pu.from.y!, pu.to.x!, pu.to.y!, pu.curve, uu);
+          g.globalAlpha = Math.sin(Math.PI * Math.min(1, uu)) * 0.8 * f * fade;
+          g.drawImage(sprite, q.x - R, q.y - R, R * 2, R * 2);
+        }
+        if (u > 0.82) {
+          const arrive = (u - 0.82) / 0.18;
+          const RR = Math.max(pu.to.r * 3.4, 9 / Math.max(0.5, t.k));
+          g.globalAlpha = Math.sin(Math.PI * arrive) * 0.5 * fade;
+          g.drawImage(sprite, pu.to.x! - RR, pu.to.y! - RR, RR * 2, RR * 2);
+        }
+      }
+      // Selection ripple: one soft ring expanding from the neuron you selected.
+      if (rippling) {
+        const sel = p.selectedId ? byId.current.get(p.selectedId) : undefined;
+        if (sel) {
+          const u = (now - rippleAt.current) / 1000;
+          const e = 1 - Math.pow(1 - u, 3);
+          g.globalCompositeOperation = "source-over";
+          g.globalAlpha = (1 - u) * 0.55;
+          g.strokeStyle = ACCENT_SOFT;
+          g.lineWidth = 1.4 / t.k;
+          g.beginPath();
+          g.arc(sel.x!, sel.y!, sel.r + (4 + 34 * e) / t.k, 0, Math.PI * 2);
+          g.stroke();
+        }
       }
     }
     g.globalAlpha = 1;
     g.globalCompositeOperation = "source-over";
     counters.current.breathFrames++;
+    // Pulses and the ripple need smooth frames while they last (only this light layer is redrawn).
+    if (busy) requestBreath();
+  };
+
+  /** A pulse along a real connection, from one neuron to the other. */
+  const sendPulse = (l: SimLink, from: SimNode, dur: number) => {
+    const a = l.source as SimNode;
+    const to = a === from ? (l.target as SimNode) : a;
+    pulses.current.push({ from, to, curve: a === from ? l.curve : -l.curve, start: performance.now(), dur, blue: from.kind === "document" && to.kind === "document" });
+    requestBreath();
+  };
+  /** Occasional activity pulse: along a real connection of something that changed recently, on screen.
+   *  If nothing changed recently, nothing pulses (no random noise). */
+  const ambientPulse = () => {
+    const pool = activityLinks.current;
+    if (!pool.length || pulses.current.length >= 3 || document.hidden) return;
+    const t = transform.current;
+    const { w, h } = size.current;
+    const on = (n: SimNode) => {
+      const sx = n.x! * t.k + t.x, sy = n.y! * t.k + t.y;
+      return sx > 0 && sx < w && sy > 0 && sy < h;
+    };
+    for (let i = 0; i < 10; i++) {
+      const l = pool[Math.floor(Math.random() * pool.length)];
+      const a = l.source as SimNode;
+      const b = l.target as SimNode;
+      if (!on(a) && !on(b)) continue;
+      sendPulse(l, a.active ? a : b, 1500 + Math.random() * 500);
+      return;
+    }
+  };
+  /** Hovering a neuron sends one soft wave along its connections. */
+  const hoverWave = (n: SimNode) => {
+    if (motion() === "minimal" || live.current.compact) return;
+    let k = 0;
+    for (const l of linksRef.current) {
+      if (l.source !== n && l.target !== n) continue;
+      sendPulse(l, n, 750 + (k % 5) * 60);
+      if (++k >= 24) break;
+    }
   };
   const breathFrame = useRef<number | null>(null);
   const requestBreath = () => {
@@ -881,8 +1196,8 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
       tree.current = { q: quadtree<SimNode>().x((d) => d.x!).y((d) => d.y!).addAll(nodesRef.current), version: posVersion.current };
     }
     const slack = 6 / transform.current.k;
-    const maxR = 14 * (live.current.settings.nodeSize || 1);
-    const cand = tree.current.q.find(p.x, p.y, maxR + slack);
+    const mr = maxR.current;
+    const cand = tree.current.q.find(p.x, p.y, mr + slack);
     if (!cand) return null;
     // Prefer the closest node whose disc (plus slack) contains the point.
     let best: SimNode | null = null;
@@ -900,7 +1215,7 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
           d = d.next;
         } while (d);
       }
-      return x0 > p.x + maxR + slack || x1 < p.x - maxR - slack || y0 > p.y + maxR + slack || y1 < p.y - maxR - slack;
+      return x0 > p.x + mr + slack || x1 < p.x - mr - slack || y0 > p.y + mr + slack || y1 < p.y - mr - slack;
     });
     return best;
   };
@@ -1033,7 +1348,7 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
 
   const focusClusterId = (id: string) => {
     const c = clusters.current.get(id);
-    const members = c?.members ?? nodesRef.current.filter((n) => n.project_id === id);
+    const members = c?.members ?? nodesRef.current.filter((n) => n.group === id);
     if (!members.length) return;
     focusedCluster.current = id;
     fitNodes(members, true, 1.8);
@@ -1156,7 +1471,7 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
   useEffect(() => {
     const c = canvas.current!;
     // Diagnostics hook (used by the performance tests): real counters from this renderer.
-    if (!live.current.compact) (window as any).__mothGraphStats = () => ({ nodes: nodesRef.current.length, links: linksRef.current.length, frames: counters.current.frames, breathFrames: counters.current.breathFrames, lastFrameMs: counters.current.lastFrameMs, simAlpha: sim.current?.alpha() ?? 0, bgFrames: atmos.current?.frames ?? 0, clusters: [...clusters.current.values()].filter((c) => c.a > 0.5).map((c) => ({ id: c.id, name: c.name })), labels: clusterLabels.current.map((l) => ({ ...l })), transform: { ...transform.current }, screen: Object.fromEntries(nodesRef.current.map((n) => { const r = canvas.current!.getBoundingClientRect(); return [n.title, [r.left + transform.current.x + n.x! * transform.current.k, r.top + transform.current.y + n.y! * transform.current.k]]; })) });
+    if (!live.current.compact) (window as any).__mothGraphStats = () => ({ nodes: nodesRef.current.length, links: linksRef.current.length, frames: counters.current.frames, breathFrames: counters.current.breathFrames, lastFrameMs: counters.current.lastFrameMs, visibleLinks: counters.current.visEdges, bundles: counters.current.bundles, nodeLabels: counters.current.labels, detail: counters.current.detail, pulses: counters.current.pulses, grouped: grouped.current, groups: new Set(nodesRef.current.map((n) => n.group).filter(Boolean)).size, maxRadius: maxR.current, overlaps: (() => { let o = 0; const ns = nodesRef.current; const q = quadtree<SimNode>().x((d) => d.x!).y((d) => d.y!).addAll(ns); for (const n of ns) { q.visit((nd, x0, y0, x1, y1) => { if (!("length" in nd)) { let d: any = nd; do { const m = d.data as SimNode; if (m !== n && m.id > n.id && Math.hypot(m.x! - n.x!, m.y! - n.y!) < m.r + n.r) o++; d = d.next; } while (d); } return x0 > n.x! + 30 || x1 < n.x! - 30 || y0 > n.y! + 30 || y1 < n.y! - 30; }); } return o; })(), simAlpha: sim.current?.alpha() ?? 0, bgFrames: atmos.current?.frames ?? 0, clusters: [...clusters.current.values()].filter((c) => c.a > 0.5).map((c) => ({ id: c.id, name: c.name })), labels: clusterLabels.current.map((l) => ({ ...l })), transform: { ...transform.current }, screen: Object.fromEntries(nodesRef.current.map((n) => { const r = canvas.current!.getBoundingClientRect(); return [n.title, [r.left + transform.current.x + n.x! * transform.current.k, r.top + transform.current.y + n.y! * transform.current.k]]; })) });
     if (wrap.current && moteCanvas.current) atmos.current = new Atmosphere(wrap.current, moteCanvas.current);
     const resize = () => {
       if (!wrap.current) return;
@@ -1188,6 +1503,8 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
       })
       .on("end", () => {
         savePositions();
+        // The new layout is now saved: later loads keep it (no re-layout, no jumping).
+        if (relaid.current && live.current.onPositions) markLayoutCurrent();
         if (!fitted.current) {
           fitted.current = true;
           fit(true);
@@ -1246,6 +1563,7 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
       sel.call(dr as any);
     }
 
+    let waveTimer: number | undefined;
     const onMove = (e: MouseEvent) => {
       const n = findAt(e.clientX, e.clientY);
       const cl = n ? null : clusterAt(e.clientX, e.clientY);
@@ -1257,6 +1575,9 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
         hover.current = n;
         live.current.onHover?.(n);
         requestDraw();
+        if (waveTimer) clearTimeout(waveTimer);
+        // A short dwell first, so sweeping the mouse across the graph doesn't fire waves everywhere.
+        if (n) waveTimer = window.setTimeout(() => hover.current === n && hoverWave(n), 160);
       }
       c.style.cursor = n || cl ? "pointer" : "default";
     };
@@ -1318,6 +1639,7 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     c.addEventListener("dblclick", onDbl);
     c.addEventListener("contextmenu", onCtx);
     return () => {
+      if (waveTimer) clearTimeout(waveTimer);
       ro.disconnect();
       s.stop();
       cancelCamera();
@@ -1349,6 +1671,7 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     atmos.current?.setOptions({ particles: (ambientProp ?? ambientEnabled()) && !props.compact, drift: amb && !props.compact, fps: m === "full" ? 24 : 12 });
     if (ambientTimer.current) clearInterval(ambientTimer.current);
     ambientTimer.current = null;
+    let pulseTimer: number | undefined;
     if (amb && !props.compact) {
       // Breathing is a slow ~4 s cycle: 10 updates per second already look smooth (20 in Full).
       const fps = m === "full" ? 20 : 10;
@@ -1359,10 +1682,16 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
         if (!document.hasFocus() && (skip = (skip + 1) % 2)) return;
         requestBreath();
       }, 1000 / fps);
+      // Occasional activity pulses (real recent changes only): about every 2.5 s in Full, 4 s in Balanced.
+      pulseTimer = window.setInterval(() => {
+        if (document.hidden) return;
+        ambientPulse();
+      }, m === "full" ? 2500 : 4000);
     }
     requestDraw();
     return () => {
       if (ambientTimer.current) clearInterval(ambientTimer.current);
+      if (pulseTimer) clearInterval(pulseTimer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.motion, props.settings.animate, props.compact, ambientProp]);
@@ -1382,13 +1711,19 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     }
     const now = performance.now();
     const firstLoad = prev.size === 0;
-    let fresh = 0;
+    // Positions saved by an older layout algorithm (the dense ball) are laid out again, once. Pinned ones stay.
+    const relayout = firstLoad && !layoutIsCurrent();
+    if (relayout) relaid.current = true;
+    const groupOf = (d: GraphNodeData) => (d.group !== undefined ? d.group : d.project_id) ?? null;
+    const recentSince = Date.now() - RECENT_MS;
     let placed = 0;
+    const unplaced: SimNode[] = [];
     for (const d of props.nodes) {
       const old = prev.get(d.id);
-      const color = st.colorBy === "category" ? CATEGORY_COLOR[d.category] ?? NODE : st.colorBy === "project" ? props.projectColors?.get(d.project_id ?? "") ?? NODE : NODE;
+      const color = st.colorBy === "category" ? CATEGORY_COLOR[d.category] ?? NODE : st.colorBy === "project" ? props.projectColors?.get(d.project_id ?? "") ?? (d.kind === "document" ? NOTE : NODE) : NODE;
+      const extra = { r: radius(d, st.nodeSize), color, core: isCore(d), group: groupOf(d), deg: nb.get(d.id)?.size ?? 0, active: !!d.updated_at && Date.parse(d.updated_at) >= recentSince };
       if (old) {
-        Object.assign(old, d, { x: old.x, y: old.y, r: radius(d, st.nodeSize), color, core: isCore(d) });
+        Object.assign(old, d, { x: old.x, y: old.y }, extra);
         if (d.pinned && d.x != null && d.y != null && old.fx == null) {
           old.fx = old.x;
           old.fy = old.y;
@@ -1400,8 +1735,8 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
         next.set(d.id, old);
         continue;
       }
-      const n = { ...d, x: undefined, y: undefined, r: radius(d, st.nodeSize), color, glow: 0, hi: 0, dim: 0, grow: 0, appearAt: 0, pulseAt: 0, phase: Math.random() * Math.PI * 2, core: isCore(d) } as SimNode;
-      if (d.x != null && d.y != null) {
+      const n = { ...d, x: undefined, y: undefined, glow: 0, hi: 0, dim: 0, grow: 0, appearAt: 0, pulseAt: 0, phase: Math.random() * Math.PI * 2, hub: false, ...extra } as SimNode;
+      if (d.x != null && d.y != null && (!relayout || d.pinned)) {
         n.x = d.x;
         n.y = d.y;
         placed++;
@@ -1409,76 +1744,171 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
           n.fx = d.x;
           n.fy = d.y;
         }
-      } else {
-        // Enter next to an already-placed neighbour (or its project), so new knowledge appears where it belongs.
-        const anchor = [...(nb.get(d.id) ?? [])].map((id) => prev.get(id) ?? next.get(id)).find((x) => x && x.x != null)
-          ?? (d.project_id ? [...prev.values()].find((x) => x.project_id === d.project_id && x.x != null) : undefined);
-        const ang = Math.random() * Math.PI * 2;
-        const dist = anchor ? 16 + Math.random() * 12 : 40 + Math.random() * 120;
-        n.x = (anchor?.x ?? 0) + Math.cos(ang) * dist;
-        n.y = (anchor?.y ?? 0) + Math.sin(ang) * dist;
-        fresh++;
-      }
+      } else unplaced.push(n);
       // Entrance animation only for memories that really appeared after the graph was shown.
       if (!firstLoad || pendingNew.current.has(d.id)) n.appearAt = pendingNew.current.get(d.id) ?? now;
       pendingNew.current.delete(d.id);
       next.set(d.id, n);
     }
+    const all = [...next.values()];
+    // Hubs: the most connected nodes in this view (e.g. index notes linking to hundreds of notes).
+    const degs = all.map((n) => n.deg).sort((a, b) => a - b);
+    const hubMin = Math.max(24, degs[Math.floor(degs.length * 0.985)] ?? 0);
+    for (const n of all) n.hub = n.deg >= hubMin;
+    maxR.current = Math.max(8, ...all.map((n) => n.r)) + 2;
+
+    // ---- groups and their anchors
+    const members = new Map<string, SimNode[]>();
+    for (const n of all) if (n.group) (members.get(n.group) ?? members.set(n.group, []).get(n.group)!).push(n);
+    const useGroups = props.clusterByProject !== false && members.size > 1;
+    grouped.current = useGroups;
+    const pairs = new Map<string, { a: string; b: string; count: number }>();
+    if (useGroups) {
+      for (const l of props.links) {
+        const ga = next.get(l.source_id)?.group;
+        const gb = next.get(l.target_id)?.group;
+        if (!ga || !gb || ga === gb) continue;
+        const [a, b] = ga < gb ? [ga, gb] : [gb, ga];
+        const key = `${a}|${b}`;
+        const pr = pairs.get(key) ?? pairs.set(key, { a, b, count: 0 }).get(key)!;
+        pr.count++;
+      }
+    }
+    crossPairs.current = pairs;
+    groupState.current.version = -1;
+    const spacing = 14 * st.nodeSize;
+    const gapR = 26 * st.nodeSize;
+    let anchors = new Map<string, { x: number; y: number; R: number }>();
+    if (useGroups) {
+      const key = [...members].map(([g, ms]) => `${g}:${Math.round(Math.log2(ms.length + 1) * 2)}`).sort().join("|") + `@${st.nodeSize}`;
+      if (anchorCache.current && anchorCache.current.key === key && !relayout) anchors = anchorCache.current.map;
+      else {
+        // A small layout of the groups themselves: each group is a disc sized by its members; real links between
+        // groups pull them together, so related regions end up side by side. Groups whose members already have
+        // saved positions stay where they are.
+        type GNode = SimulationNodeDatum & { id: string; R: number; size: number };
+        const order = [...members].sort((a, b) => b[1].length - a[1].length);
+        const gnodes: GNode[] = order.map(([id, ms], i) => {
+          const R = spacing * (1.15 * Math.sqrt(ms.length) + 1.4);
+          const placedMs = ms.filter((n) => n.x != null);
+          const gn: GNode = { id, R, size: ms.length };
+          if (placedMs.length >= Math.max(1, ms.length * 0.6)) {
+            gn.fx = placedMs.reduce((a, n) => a + n.x!, 0) / placedMs.length;
+            gn.fy = placedMs.reduce((a, n) => a + n.y!, 0) / placedMs.length;
+            gn.x = gn.fx;
+            gn.y = gn.fy;
+          } else {
+            const r = spacing * 6 * Math.sqrt(i + 0.5);
+            gn.x = Math.cos(i * 2.39996) * r;
+            gn.y = Math.sin(i * 2.39996) * r;
+          }
+          return gn;
+        });
+        const gById = new Map(gnodes.map((g) => [g.id, g]));
+        const glinks = [...pairs.values()].map((pr) => ({ source: pr.a, target: pr.b, count: pr.count }));
+        const gsim = forceSimulation<GNode>(gnodes)
+          .force("link", forceLink<GNode, any>(glinks).id((d) => d.id).distance((l: any) => (l.source as GNode).R + (l.target as GNode).R + gapR).strength((l: any) => Math.min(0.6, 0.06 + (0.5 * l.count) / Math.min((l.source as GNode).size, (l.target as GNode).size) / 4)))
+          .force("charge", forceManyBody<GNode>().strength((d) => -40 - 3 * Math.sqrt(d.size) * spacing))
+          .force("collide", forceCollide<GNode>((d) => d.R + gapR * 0.6).iterations(3).strength(1))
+          .force("x", forceX<GNode>(0).strength(0.04))
+          .force("y", forceY<GNode>(0).strength(0.04))
+          .stop();
+        for (let i = 0; i < 320; i++) gsim.tick();
+        for (const g of gnodes) anchors.set(g.id, { x: g.x!, y: g.y!, R: g.R });
+        anchorCache.current = { key, map: anchors };
+        void gById;
+      }
+    }
+    const anchorOf = (d: SimNode) => (useGroups && d.group ? anchors.get(d.group) : undefined);
+
+    // ---- place nodes without a position: inside their group's region, or next to a placed neighbour.
+    for (const n of unplaced) {
+      const an = anchorOf(n);
+      const nbr = [...(nb.get(n.id) ?? [])].map((id) => next.get(id)).find((x) => x && x.x != null);
+      const ang = Math.random() * Math.PI * 2;
+      if (an && (relayout || !nbr)) {
+        const rr = an.R * 0.75 * Math.sqrt(Math.random());
+        n.x = an.x + Math.cos(ang) * rr;
+        n.y = an.y + Math.sin(ang) * rr;
+      } else if (nbr) {
+        const dist = 16 + Math.random() * 12;
+        n.x = nbr.x! + Math.cos(ang) * dist;
+        n.y = nbr.y! + Math.sin(ang) * dist;
+      } else {
+        const dist = 40 + Math.random() * 120;
+        n.x = Math.cos(ang) * dist;
+        n.y = Math.sin(ang) * dist;
+      }
+    }
+
     const prevLinks = new Map(linksRef.current.map((l) => [l.id, l]));
     byId.current = next;
     neighbours.current = nb;
-    nodesRef.current = [...next.values()];
+    nodesRef.current = all;
     linksRef.current = props.links
       .filter((l) => next.has(l.source_id) && next.has(l.target_id))
       .map((l) => {
         const was = prevLinks.get(l.id);
         const bornAt = pendingLinks.current.get(l.id) ?? (!firstLoad && !was ? now : was?.bornAt ?? 0);
         pendingLinks.current.delete(l.id);
-        return { id: l.id, type: l.type, strength: l.strength, source: next.get(l.source_id)!, target: next.get(l.target_id)!, hi: was?.hi ?? 0, bornAt };
+        const a = next.get(l.source_id)!;
+        const b = next.get(l.target_id)!;
+        const hb = hash01(l.id);
+        return {
+          id: l.id, type: l.type, strength: l.strength, source: a, target: b, hi: was?.hi ?? 0, bornAt,
+          cross: useGroups && !!a.group && !!b.group && a.group !== b.group,
+          hubby: a.hub || b.hub,
+          curve: (hb < 0.5 ? -1 : 1) * (0.05 + Math.abs(hb - 0.5) * 0.22),
+          lod: hash01(l.id + "~"),
+        };
       });
+    activityLinks.current = linksRef.current.filter((l) => (l.source as SimNode).active || (l.target as SimNode).active).slice(0, 4000);
     posVersion.current++;
 
-    // Cluster anchors from real project membership (golden-angle spiral, spaced by graph size).
-    const projectCounts = new Map<string, number>();
-    for (const n of nodesRef.current) if (n.project_id) projectCounts.set(n.project_id, (projectCounts.get(n.project_id) ?? 0) + 1);
-    const projects = [...projectCounts.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
-    const total0 = nodesRef.current.length;
-    const spread = 120 + 14 * Math.sqrt(total0);
-    const anchorK = 0.06 + 0.07 * Math.min(1, total0 / 600);
-    const anchors = new Map<string, { x: number; y: number }>();
-    projects.forEach((id, i) => {
-      const r = spread * Math.sqrt(i + (projects.length > 1 ? 0.6 : 0));
-      const a = i * 2.39996;
-      anchors.set(id, { x: Math.cos(a) * r, y: Math.sin(a) * r });
-    });
-    const cluster = props.clusterByProject !== false && projects.length > 1;
-    const anchorOf = (d: SimNode) => (cluster && d.project_id ? anchors.get(d.project_id) : undefined);
-
-    s.nodes(nodesRef.current);
+    // ---- forces
+    const total = all.length;
+    const dg = (n: SimNode) => Math.max(1, n.deg);
+    s.nodes(all);
     s.force(
       "link",
       forceLink<SimNode, SimLink>(linksRef.current)
         .id((d) => d.id)
-        .distance((l) => st.linkDistance + ((l.source as SimNode).r + (l.target as SimNode).r) * 1.4)
+        .distance((l) => {
+          const a = l.source as SimNode;
+          const b = l.target as SimNode;
+          return st.linkDistance * 0.75 + (a.r + b.r) * 1.3 + (l.hubby ? 24 : 0) + (l.cross ? 30 : 0);
+        })
         .strength((l) => {
           const a = l.source as SimNode;
           const b = l.target as SimNode;
-          // Cross-project links pull less, so clusters stay readable without hiding real connections.
-          const cross = cluster && a.project_id && b.project_id && a.project_id !== b.project_id ? 0.12 : 1;
-          return (cross * st.linkForce * (0.6 + 0.4 * l.strength)) / Math.sqrt(Math.min(nb.get(a.id)?.size ?? 1, nb.get(b.id)?.size ?? 1));
+          // Normalised by BOTH ends' degree: a hub linking to hundreds of nodes pulls each of them only weakly
+          // (that pull is what collapsed big vaults into one ball). Links between groups pull less again.
+          const base = (st.linkForce * (0.6 + 0.4 * l.strength) * 3) / Math.sqrt(dg(a) * dg(b));
+          return Math.min(0.8, base) * (l.cross ? 0.15 : 1);
         }),
     );
-    // Larger graphs need a little more room per node to avoid a dense core.
-    const repel = st.repelForce * (1 + 0.35 * Math.log10(Math.max(1, total0 / 100)));
-    s.force("charge", forceManyBody<SimNode>().strength((d) => -repel * (d.category === "project" ? 1.8 : 1)).distanceMin(4).distanceMax(600).theta(0.9));
-    s.force("x", forceX<SimNode>((d) => anchorOf(d)?.x ?? 0).strength((d) => (anchorOf(d) ? anchorK : st.centerForce * 0.5)));
-    s.force("y", forceY<SimNode>((d) => anchorOf(d)?.y ?? 0).strength((d) => (anchorOf(d) ? anchorK : st.centerForce * 0.5)));
-    s.force("collide", forceCollide<SimNode>((d) => d.r + 3.5).iterations(2).strength(0.8));
+    // Repulsion is local (distanceMax): it spaces neighbours without inflating the whole graph into a disk.
+    const repel = st.repelForce * (useGroups ? 0.3 : 0.6) * (1 + 0.25 * Math.log10(Math.max(1, total / 100)));
+    s.force("charge", forceManyBody<SimNode>().strength((d) => -repel * (d.category === "project" ? 1.8 : d.hub ? 1.5 : 1)).distanceMin(4).distanceMax(useGroups ? 240 : 600).theta(0.9));
+    const anchorK = 0.07;
+    s.force("x", forceX<SimNode>((d) => anchorOf(d)?.x ?? 0).strength((d) => (anchorOf(d) ? anchorK : st.centerForce * (useGroups ? 0.25 : 0.5))));
+    s.force("y", forceY<SimNode>((d) => anchorOf(d)?.y ?? 0).strength((d) => (anchorOf(d) ? anchorK : st.centerForce * (useGroups ? 0.25 : 0.5))));
+    s.force("collide", forceCollide<SimNode>((d) => d.r + 4 * st.nodeSize + (d.hub ? 3 : 0)).iterations(2).strength(0.75));
 
-    const total = nodesRef.current.length;
+    const fresh = unplaced.length;
+    // Settle most of a new layout before the first frame (bounded to ~0.25 s), so it unfolds calmly instead of
+    // starting as a tangle; the rest settles visibly.
+    const preSettle = () => {
+      const t0 = performance.now();
+      s.alpha(1);
+      while (performance.now() - t0 < 250 && s.alpha() > 0.08) s.tick();
+    };
     if (!st.animate) {
       s.stop();
-      if (fresh > 0 || firstLoad) for (let i = 0; i < Math.min(300, 60 + total); i++) s.tick();
+      if (fresh > 0 || firstLoad) {
+        s.alpha(1);
+        for (let i = 0; i < Math.min(320, 80 + total); i++) s.tick();
+      }
       requestDraw();
       savePositions();
       if (!fitted.current) {
@@ -1488,7 +1918,11 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     } else if (firstLoad) {
       // Saved layout: settle gently instead of re-generating the graph.
       const saved = placed / Math.max(1, total);
-      s.alpha(saved > 0.8 ? 0.08 : 1).restart();
+      if (saved > 0.8) s.alpha(0.03).restart();
+      else {
+        preSettle();
+        s.alpha(Math.min(s.alpha(), 0.3)).restart();
+      }
       if (saved > 0.8 && !fitted.current) {
         fitted.current = true;
         requestAnimationFrame(() => fit(false));
@@ -1516,6 +1950,14 @@ export const GraphCanvas = forwardRef<GraphHandle, Props>(function GraphCanvas(p
     requestDraw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.bloom]);
+
+  // Selecting a neuron: one soft ripple (not in Minimal motion).
+  useEffect(() => {
+    if (!props.selectedId || props.compact || motion() === "minimal") return;
+    rippleAt.current = performance.now();
+    requestBreath();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.selectedId]);
 
   useEffect(requestDraw, [props.selectedId, props.highlight, props.edgeHighlight, props.suggested, props.attention, props.motion, props.clusters, props.settings.showLabels, props.settings.textFadeThreshold, props.settings.linkThickness, props.settings.showArrows]);
 

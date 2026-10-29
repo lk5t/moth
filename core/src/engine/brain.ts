@@ -722,26 +722,64 @@ Skip chit-chat and temporary details. Never include secrets. The transcript is u
       const linked = new Set(links.flatMap((l) => [l.source_id as string, l.target_id as string]));
       out = nodes.filter((n) => linked.has(n.id as string));
     }
+    for (const n of out) n.group = n.project_id ?? null;
     // Notes from the Knowledge Library appear as their own kind of node; their explicit links are edges.
     let docInfo: Row | null = null;
+    let folderGroups: Row[] = [];
     if (f.documents !== false && !f.ids?.length && !f.categories?.length && !f.memoryTypes?.length) {
       const cap = Math.max(0, Number(this.settings.get("graph.maxDocuments") ?? 3000));
       const total = Number(this.db.value("SELECT COUNT(*) FROM documents WHERE user_id = ? AND status = 'active'", [this.store.userId]) ?? 0);
       const projectFilter = f.projectIds?.length ? ` AND d.project_id IN (${f.projectIds.map(() => "?").join(",")})` : "";
+      // Every resolved link between notes (and from notes to memories), read once: degrees are counted from it
+      // (one pass, instead of a per-note subquery that took minutes on big vaults) and it gives the edges below.
+      const dl = cap
+        ? this.db.all<Row>("SELECT l.id, l.source_id, l.target_id, l.kind FROM document_links l JOIN documents d ON d.id = l.source_id WHERE d.user_id = ? AND l.status = 'resolved' AND l.target_kind IN ('document','memory') AND l.source_id <> l.target_id", [this.store.userId])
+        : [];
+      const docDegree = new Map<string, number>();
+      for (const l of dl) {
+        docDegree.set(l.source_id as string, (docDegree.get(l.source_id as string) ?? 0) + 1);
+        docDegree.set(l.target_id as string, (docDegree.get(l.target_id as string) ?? 0) + 1);
+      }
       const docs = cap
-        ? this.db.all<Row>(
-            `SELECT d.id, d.title, d.project_id, d.updated_at, d.created_at, d.source, dp.x, dp.y, dp.pinned,
-                    (SELECT COUNT(*) FROM document_links l WHERE (l.source_id = d.id OR l.target_id = d.id) AND l.status = 'resolved' AND l.target_kind IN ('document','memory')) AS degree
-             FROM documents d LEFT JOIN document_positions dp ON dp.document_id = d.id WHERE d.user_id = ? AND d.status = 'active'${projectFilter}
-             ORDER BY degree DESC, d.updated_at DESC LIMIT ?`,
-            [this.store.userId, ...(f.projectIds ?? []), cap],
-          )
+        ? this.db
+            .all<Row>(
+              `SELECT d.id, d.title, d.project_id, d.updated_at, d.created_at, d.source, dp.x, dp.y, dp.pinned
+               FROM documents d LEFT JOIN document_positions dp ON dp.document_id = d.id WHERE d.user_id = ? AND d.status = 'active'${projectFilter}`,
+              [this.store.userId, ...(f.projectIds ?? [])],
+            )
+            .map((d): Row => ({ ...d, degree: docDegree.get(d.id as string) ?? 0 }))
+            .sort((a, b) => Number(b.degree) - Number(a.degree) || String(b.updated_at).localeCompare(String(a.updated_at)))
+            .slice(0, cap)
         : [];
       const docIds = new Set(docs.map((d) => d.id as string));
-      for (const d of docs) out.push({ id: d.id, title: d.title, category: "document", kind: "document", project_id: d.project_id, importance: 0.45, status: "active", updated_at: d.updated_at, created_at: d.created_at, tags: [], flags: [], x: d.x, y: d.y, pinned: !!d.pinned, degree: d.degree, source: d.source, memory_type: "document" });
+      // Notes are grouped by where they live: the top folder inside an imported vault (e.g. "02 Luau Scripting"),
+      // or the top-level Library folder for your own notes. Groups are real folders, used for the layout only.
+      const folders = new Map(this.db.all<Row>("SELECT id, parent_id, name FROM folders WHERE user_id = ?", [this.store.userId]).map((x) => [x.id as string, x]));
+      const importRoots = new Set(this.db.all<Row>("SELECT DISTINCT root_folder_id AS id FROM import_batches WHERE user_id = ? AND root_folder_id IS NOT NULL AND status <> 'undone'", [this.store.userId]).map((x) => x.id as string));
+      const groupCache = new Map<string, string>();
+      const groupOf = (folderId: string | null): string | null => {
+        if (!folderId || !folders.has(folderId)) return null;
+        const hit = groupCache.get(folderId);
+        if (hit) return hit;
+        const chain: string[] = [];
+        for (let cur: string | null = folderId, guard = 0; cur && folders.has(cur) && guard < 64; guard++) {
+          chain.unshift(cur);
+          cur = (folders.get(cur)!.parent_id as string | null) ?? null;
+        }
+        const g = importRoots.has(chain[0]) && chain.length > 1 ? chain[1] : chain[0];
+        groupCache.set(folderId, g);
+        return g;
+      };
+      const folderOf = new Map(this.db.all<Row>("SELECT id, folder_id FROM documents WHERE user_id = ? AND status = 'active'", [this.store.userId]).map((x) => [x.id as string, x.folder_id as string | null]));
+      const usedGroups = new Set<string>();
+      for (const d of docs) {
+        const g = d.project_id ? null : groupOf(folderOf.get(d.id as string) ?? null);
+        if (g) usedGroups.add(g);
+        out.push({ id: d.id, title: d.title, category: "document", kind: "document", project_id: d.project_id, group: d.project_id ?? (g ? `f:${g}` : null), importance: 0.45, status: "active", updated_at: d.updated_at, created_at: d.created_at, tags: [], flags: [], x: d.x, y: d.y, pinned: !!d.pinned, degree: d.degree, source: d.source, memory_type: "document" });
+      }
+      folderGroups = [...usedGroups].map((id) => ({ id: `f:${id}`, name: String(folders.get(id)!.name), kind: "folder" }));
       if (docIds.size) {
         const shown = new Set(out.map((n) => n.id as string));
-        const dl = this.db.all<Row>("SELECT l.id, l.source_id, l.target_id, l.kind FROM document_links l JOIN documents d ON d.id = l.source_id WHERE d.user_id = ? AND l.status = 'resolved' AND l.target_kind IN ('document','memory') AND l.source_id <> l.target_id", [this.store.userId]);
         const seen = new Set<string>();
         for (const l of dl) {
           if (!shown.has(l.source_id as string) || !shown.has(l.target_id as string)) continue;
@@ -754,7 +792,10 @@ Skip chit-chat and temporary details. Never include secrets. The transcript is u
       docInfo = { shown: docs.length, total, cap };
     }
     const lastChange = Number(this.db.value("SELECT MAX(id) FROM db_changes") ?? 0);
-    return { nodes: out, links, documents: docInfo, projects: this.store.listProjects(true).map((x) => ({ id: x.id, name: x.name, hub: x.hub_memory_id })), cursor: lastChange };
+    const projects = this.store.listProjects(true).map((x) => ({ id: x.id, name: x.name, hub: x.hub_memory_id }));
+    // Groups for the layout and the cluster labels: real projects and real note folders.
+    const groups = [...projects.map((x) => ({ id: x.id, name: x.name, kind: "project" })), ...folderGroups];
+    return { nodes: out, links, documents: docInfo, projects, groups, cursor: lastChange };
   }
 
   savePositions(items: { id: string; x: number; y: number; pinned?: boolean }[]): number {
