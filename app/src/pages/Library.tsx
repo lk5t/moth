@@ -76,8 +76,8 @@ function LibraryInner() {
 function Sidebar({ view, setView, onImport, onNewNote }: { view: View; setView: (v: View) => void; onImport: () => void; onNewNote: (folder?: string | null) => void }) {
   const { toast } = useApp();
   const ws = useWorkspace();
-  const { data: stats } = useLive<any>("library.stats", {}, { entities: ["document", "folder", "collection", "memory", "project", "import"] });
-  const { data: tree, reload: reloadTree } = useLive<any[]>("library.tree", {}, { entities: ["folder", "document", "import"] });
+  const { data: stats } = useLive<any>("library.stats", {}, { entities: ["document", "folder", "collection", "memory", "project"] });
+  const { data: tree, reload: reloadTree } = useLive<any[]>("library.tree", {}, { entities: ["folder", "document"] });
   const { data: cols, reload: reloadCols } = useLive<any[]>("collections.list", {}, { entities: ["collection"] });
   const { data: tags } = useLive<any[]>("library.tags", {}, { entities: ["document"] });
   const [open, setOpen] = useState<Set<string>>(new Set());
@@ -401,7 +401,7 @@ function usePaged(filter: any | null) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
   // Live refresh on library changes (reloads the first page).
-  const { data: stamp } = useLive<any>("library.stats", {}, { entities: ["document", "import"], enabled: !!filter });
+  const { data: stamp } = useLive<any>("library.stats", {}, { entities: ["document"], enabled: !!filter });
   useEffect(() => {
     if (stamp) void load(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -537,7 +537,7 @@ function ImportHistory({ onResume }: { onResume: (id: string) => void }) {
 }
 
 function Attachments() {
-  const { data } = useLive<any>("library.attachments", { limit: 200 }, { entities: ["document", "import"] });
+  const { data } = useLive<any>("library.attachments", { limit: 200 }, { entities: ["document"] });
   const open = async (id: string) => {
     const ep = await endpoint();
     void openExternal(`http://127.0.0.1:${ep.port}/api/attachments/${id}?token=${encodeURIComponent(ep.token)}`);

@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { extractAliases, extractHeadings, extractLinks, extractTags, rewriteLinkTargets, splitFrontmatter } from "../src/vault/markdown.ts";
 import { openBrain, tmpDir, user } from "./helpers.ts";
+import { SCHEMA_VERSION } from "../src/db/migrations.ts";
 
 test("Markdown: wikilinks (alias, heading, folder path, embeds), standard links, unsafe schemes, code is ignored, unicode", () => {
   const text = [
@@ -202,12 +203,12 @@ test("Migration: a real v0.4.0 database upgrades to v0.5.0 with every memory, pr
   assert.equal(Number((raw.prepare("SELECT MAX(version) AS v FROM schema_migrations").get() as any).v), 5);
   raw.close();
   b = openBrain(dir);
-  assert.equal(Number(b.db.value("SELECT MAX(version) FROM schema_migrations")), 6);
+  assert.equal(Number(b.db.value("SELECT MAX(version) FROM schema_migrations")), SCHEMA_VERSION);
   assert.deepEqual(counts(), before, "nothing lost");
   assert.equal(b.store.getMemory(m1.id)!.content, "Matches last five minutes");
   assert.equal(b.store.versions(m1.id).length, 2);
   assert.equal(b.settings.get("graph").nodeSize, 1.7);
-  const backups = fs.readdirSync(path.join(path.dirname(file), "backups")).filter((f) => f.startsWith("before-schema-v6"));
+  const backups = fs.readdirSync(path.join(path.dirname(file), "backups")).filter((f) => f.startsWith(`before-schema-v${SCHEMA_VERSION}`));
   assert.equal(backups.length, 1, "a copy was made before upgrading");
   const copy = new DatabaseSync(path.join(path.dirname(file), "backups", backups[0]), { readOnly: true });
   assert.equal(Number((copy.prepare("SELECT COUNT(*) AS n FROM memories").get() as any).n), before[0]);

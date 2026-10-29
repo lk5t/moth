@@ -44,6 +44,8 @@ export interface ImportOptions {
 const DEFAULT_EXCLUDED_DIRS = new Set([".obsidian", ".trash", ".git", ".github", "node_modules"]);
 const NOTE_READ_LIMIT = 20 * 1024 * 1024; // larger "notes" are recorded as failed (they can't be edited as notes anyway)
 const SLICE_MS = 60_000; // one import job works for about a minute, then hands over to the next
+/** Files up to this size are copied in one read/write (bounded: at most 4 MB in memory at a time). */
+const SMALL_FILE = 4 * 1024 * 1024;
 const DB_BATCH = 100;
 
 const yieldNow = () => new Promise((r) => setImmediate(r));
@@ -405,22 +407,29 @@ export class VaultImporter {
       const dir = path.posix.dirname(rel);
       return dir === "." ? rootFolder : lib.ensureFolderPath(dir, rootFolder, batchId);
     };
-    const progress = (phase: string, extra: Row = {}) => {
+    // Progress: counted from the manifest once per slice, then kept up to date in memory, and written at most
+    // every ~400 ms. (Recounting the whole manifest after every file cost ~40 ms per file and made big imports of
+    // small files crawl at ~20 files/s; every write also refreshed the Library in the app.)
+    const pc = (() => {
       const n = (sql: string) => Number(this.db.value(sql, [batchId]) ?? 0);
-      this.setBatch(batchId, {
-        progress: {
-          phase,
-          notes_total: n("SELECT COUNT(*) FROM import_items WHERE batch_id = ? AND kind = 'note' AND status <> 'excluded'"),
-          notes_done: n("SELECT COUNT(*) FROM import_items WHERE batch_id = ? AND kind = 'note' AND status IN ('done','duplicate','failed','skipped')"),
-          attachments_total: n("SELECT COUNT(*) FROM import_items WHERE batch_id = ? AND kind = 'attachment' AND status <> 'excluded'"),
-          attachments_done: n("SELECT COUNT(*) FROM import_items WHERE batch_id = ? AND kind = 'attachment' AND status IN ('done','duplicate','failed','skipped')"),
-          bytes_total: n("SELECT COALESCE(SUM(size),0) FROM import_items WHERE batch_id = ? AND kind IN ('note','attachment') AND status <> 'excluded'"),
-          bytes_done: n("SELECT COALESCE(SUM(size),0) FROM import_items WHERE batch_id = ? AND kind IN ('note','attachment') AND status IN ('done','duplicate','failed','skipped')") + Number(extra.partial_bytes ?? 0),
-          warnings: n("SELECT COUNT(*) FROM import_items WHERE batch_id = ? AND status = 'failed'"),
-          current: extra.current ?? null,
-          at: nowIso(),
-        },
-      });
+      return {
+        notes_total: n("SELECT COUNT(*) FROM import_items WHERE batch_id = ? AND kind = 'note' AND status <> 'excluded'"),
+        notes_done: n("SELECT COUNT(*) FROM import_items WHERE batch_id = ? AND kind = 'note' AND status IN ('done','duplicate','failed','skipped')"),
+        attachments_total: n("SELECT COUNT(*) FROM import_items WHERE batch_id = ? AND kind = 'attachment' AND status <> 'excluded'"),
+        attachments_done: n("SELECT COUNT(*) FROM import_items WHERE batch_id = ? AND kind = 'attachment' AND status IN ('done','duplicate','failed','skipped')"),
+        bytes_total: n("SELECT COALESCE(SUM(size),0) FROM import_items WHERE batch_id = ? AND kind IN ('note','attachment') AND status <> 'excluded'"),
+        bytes_done: n("SELECT COALESCE(SUM(size),0) FROM import_items WHERE batch_id = ? AND kind IN ('note','attachment') AND status IN ('done','duplicate','failed','skipped')"),
+        warnings: n("SELECT COUNT(*) FROM import_items WHERE batch_id = ? AND status = 'failed'"),
+      };
+    })();
+    let lastWrite = 0;
+    const progress = (phase: string, extra: Row = {}, force = false) => {
+      const now = Date.now();
+      if (!force && now - lastWrite < 400) return;
+      lastWrite = now;
+      // Keep the link phase's checkpoint (links_after) if one was stored.
+      const stored = safeJson<Row>(String(this.db.value("SELECT progress FROM import_batches WHERE id = ?", [batchId]) ?? "{}"), {});
+      this.setBatch(batchId, { progress: { phase, ...pc, bytes_done: pc.bytes_done + Number(extra.partial_bytes ?? 0), current: extra.current ?? null, at: nowIso(), ...(stored.links_after ? { links_after: stored.links_after } : {}) } });
     };
 
     // ---- notes
@@ -441,7 +450,10 @@ export class VaultImporter {
       this.db.tx(() => {
         for (const p of prepared) {
           const rel = String(p.row.rel_path);
+          pc.notes_done++;
+          pc.bytes_done += Number(p.row.size ?? 0);
           if (p.error || p.text === undefined) {
+            pc.warnings++;
             this.db.run("UPDATE import_items SET status = 'failed', detail = ? WHERE batch_id = ? AND rel_path = ?", [p.error ?? "Unreadable", batchId, rel]);
             continue;
           }
@@ -480,23 +492,33 @@ export class VaultImporter {
     if (!outOfTime() && !this.db.value("SELECT 1 FROM import_items WHERE batch_id = ? AND kind = 'note' AND status = 'pending'", [batchId])) {
       const dir = lib.attachmentDir();
       fs.mkdirSync(path.join(dir, "tmp"), { recursive: true });
-      while (!outOfTime()) {
-        stop();
-        const r = this.db.get<Row>("SELECT * FROM import_items WHERE batch_id = ? AND kind = 'attachment' AND status = 'pending' ORDER BY rel_path LIMIT 1", [batchId]);
-        if (!r) break;
-        worked = true;
-        const rel = String(r.rel_path);
-        try {
-          const id = await this.copyAttachment(path.join(root, rel), path.posix.basename(rel), batchId, signal, (partial) => {
-            if (partial % (64 * 1024 * 1024) < 1024 * 1024) progress("attachments", { current: rel, partial_bytes: partial });
-          });
-          this.db.run("UPDATE import_items SET status = 'done', entity_id = ? WHERE batch_id = ? AND rel_path = ?", [id, batchId, rel]);
-        } catch (e) {
-          if (signal.aborted) throw e;
-          this.db.run("UPDATE import_items SET status = 'failed', detail = ? WHERE batch_id = ? AND rel_path = ?", [`Copy failed: ${(e as Error).message}`, batchId, rel]);
+      // Pending files are read 200 at a time in path order (a cursor, so finished files are never scanned again).
+      let cursor = "";
+      let copied = 0;
+      outer: while (!outOfTime()) {
+        const chunk = this.db.all<Row>("SELECT * FROM import_items WHERE batch_id = ? AND kind = 'attachment' AND status = 'pending' AND rel_path > ? ORDER BY rel_path LIMIT 200", [batchId, cursor]);
+        if (!chunk.length) break;
+        for (const r of chunk) {
+          if (outOfTime()) break outer;
+          stop();
+          worked = true;
+          const rel = String(r.rel_path);
+          cursor = rel;
+          try {
+            const id = await this.copyAttachment(path.join(root, rel), path.posix.basename(rel), batchId, signal, (partial) => progress("attachments", { current: rel, partial_bytes: partial }));
+            this.db.run("UPDATE import_items SET status = 'done', entity_id = ? WHERE batch_id = ? AND rel_path = ?", [id, batchId, rel]);
+          } catch (e) {
+            if (signal.aborted) throw e;
+            pc.warnings++;
+            this.db.run("UPDATE import_items SET status = 'failed', detail = ? WHERE batch_id = ? AND rel_path = ?", [`Copy failed: ${(e as Error).message}`, batchId, rel]);
+          }
+          pc.attachments_done++;
+          copied++;
+          pc.bytes_done += Number(r.size ?? 0);
+          progress("attachments", { current: rel });
         }
-        progress("attachments", { current: rel });
       }
+      if (copied) progress("attachments", {}, true);
     }
 
     const pendingFiles = Number(this.db.value("SELECT COUNT(*) FROM import_items WHERE batch_id = ? AND kind IN ('note','attachment') AND status = 'pending'", [batchId]) ?? 0);
@@ -563,7 +585,15 @@ export class VaultImporter {
       },
     });
     try {
-      await pipeline(fs.createReadStream(src, { highWaterMark: 1024 * 1024 }), meter, fs.createWriteStream(tmp), { signal });
+      // Small files (most of a typical vault: images, textures, model parts) are read and written in one step;
+      // large ones are streamed in 1 MB chunks so memory stays bounded whatever their size.
+      const size = fs.statSync(src).size;
+      if (size <= SMALL_FILE) {
+        const data = await fs.promises.readFile(src, { signal });
+        hash.update(data);
+        n = data.length;
+        await fs.promises.writeFile(tmp, data, { signal });
+      } else await pipeline(fs.createReadStream(src, { highWaterMark: 1024 * 1024 }), meter, fs.createWriteStream(tmp), { signal });
       const digest = hash.digest("hex");
       // Stored once per content: the same file under another name gets its own entry pointing at the same stored file.
       const same = this.db.get<Row>("SELECT id FROM attachments WHERE user_id = ? AND sha256 = ? AND original_name = ? COLLATE NOCASE", [this.brain.store.userId, digest, name]);

@@ -1,6 +1,6 @@
 {
   "name": "@moth/core",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "description": "MOTH memory engine, MCP server and local API (runs as the desktop app's sidecar)",
   "type": "module",

@@ -440,3 +440,17 @@ On restore, tabs whose record no longer exists are dropped with a notice (`works
   reduced motion; drawn on the light layer only.
 - **Engine fix:** note degrees for the graph were a correlated subquery per note with an `OR` (no index): 3.4 s for
   848 notes / 21k links, 2 min 28 s for 3,000 notes. Now counted in one pass over the links: 0.13 s / 0.53 s.
+
+### v0.5.3 — big vaults: import speed and Library responsiveness
+- **Import progress was the bottleneck.** After every file the importer recounted the whole manifest (7 aggregate
+  queries, ~21 ms on 38,000 items, twice per file) and wrote the progress row, which also wrote a change-feed row
+  and made the Library reload its tree, stats and file list. Small files imported at ~20/s. Now the counts are read
+  once per slice and kept in memory, progress is written at most every ~400 ms (keeping the link phase's
+  `links_after` checkpoint), pending files are read 200 at a time with a path cursor, and files up to 4 MB are
+  copied with one read/write (larger ones still stream in 1 MB chunks).
+- **The Library no longer reloads on import progress** (tree, stats, files list refresh on note/folder changes and
+  when the import finishes).
+- **Migration v7:** `idx_attach_created(user_id, created_at DESC)` for the Files list (sorted by date).
+- Measured (Linux test machine, 2 cores; a vault like the user's: 848 notes, 38,000 small files in ~2,500 folders):
+  import 43.5 s (was ~31 min at ~20 files/s), 202 progress writes (was ~38,000+), Files list page 2–4 ms (was
+  88–251 ms), reopening the database 80 ms.

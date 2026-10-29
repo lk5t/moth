@@ -937,6 +937,13 @@ CREATE TABLE workspace_sessions (
 );
 `,
   },
+  {
+    // v0.5.3: the Library's Files list is sorted by date; with tens of thousands of files that sort ran on every
+    // page (90-250 ms). An index makes each page a short index walk. Adds an index only; no data changes.
+    version: 7,
+    name: "attachments_by_date",
+    sql: `CREATE INDEX IF NOT EXISTS idx_attach_created ON attachments(user_id, created_at DESC);`,
+  },
 ];
 
 export function runMigrations(db: Database): void {
